@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Build bằng lệnh:  pyinstaller van_ban_tool.spec
+# Build bằng lệnh:  pyinstaller slh_tool.spec
 #
 # Chế độ --onedir (KHÔNG dùng --onefile): mở app nhanh hơn hẳn onefile (onefile phải
 # tự giải nén ra thư mục tạm mỗi lần mở) và ít bị phần mềm diệt virus / SmartScreen
-# báo nhầm hơn. Kết quả nằm trong thư mục dist/van_ban_tool/ gồm van_ban_tool.exe
+# báo nhầm hơn. Kết quả nằm trong thư mục dist/slh_tool/ gồm slh_tool.exe
 # và các file .dll/.pyd đi kèm — Inno Setup (installer.iss) sẽ đóng gói cả thư mục
 # này thành 1 file cài đặt duy nhất để đưa cho người dùng.
 
@@ -13,7 +13,7 @@ from PyInstaller.utils.hooks import collect_submodules
 block_cipher = None
 
 a = Analysis(
-    ['van_ban_tool.py'],
+    ['slh_tool.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -44,7 +44,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='van_ban_tool',
+    name='slh_tool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

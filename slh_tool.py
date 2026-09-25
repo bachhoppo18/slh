@@ -20,7 +20,7 @@ Build EXE:
 
     pip install pyinstaller
 
-    pyinstaller --onefile --windowed --icon=app.ico van_ban_tool.py
+    pyinstaller --onefile --windowed --icon=app.ico slhtool.py
 
 ============================================================
 

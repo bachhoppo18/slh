@@ -59,8 +59,8 @@ if errorlevel 1 goto :loi
 
 echo.
 echo === 5/6: Tải sẵn model (để người dùng chạy OFFLINE được ngay từ lần đầu) ===
-REM HANLP_HOME đặt NGAY TRONG gói — phải trùng với đường dẫn app.py sẽ trỏ tới
-REM (APP_DATA_DIR/hanlp_runtime/hanlp_home), xem hàm _hanlp_worker trong van_ban_tool.py.
+REM HANLP_HOME đặt NGAY TRONG gói — phải trùng với đường dẫn slhtool.py sẽ trỏ tới
+REM (APP_DATA_DIR/hanlp_runtime/hanlp_home), xem hàm _hanlp_worker trong slhtool.py.
 set HANLP_HOME=%RUNTIME%\hanlp_home
 "%RUNTIME%\python.exe" -c "import hanlp; hanlp.load(hanlp.pretrained.mtl.CLOSE_TOK_POS_NER_SRL_DEP_SDP_CON_ELECTRA_SMALL_ZH); print('Đã tải xong model.')"
 if errorlevel 1 goto :loi
