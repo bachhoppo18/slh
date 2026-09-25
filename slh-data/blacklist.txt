@@ -9,7 +9,7 @@
 # Sau khoảng 3-5 phút, vào tab "Actions" của repo xem tiến trình build. Xong sẽ
 # tự tạo 1 "Release" mới ở tab "Releases" kèm 2 file cho người dùng tải:
 #   - SLHTool_Setup.exe        (bộ cài, khuyên dùng)
-#   - slh_tool_portable.zip   (giải nén ra chạy luôn, không cần cài)
+#   - slhtool_portable.zip   (giải nén ra chạy luôn, không cần cài)
 name: Build Windows EXE
 
 on:
@@ -48,8 +48,8 @@ jobs:
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
-          (Get-Content slh_tool.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$v`"" |
-            Set-Content slh_tool.py -Encoding utf8
+          (Get-Content slhtool.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$v`"" |
+            Set-Content slhtool.py -Encoding utf8
           (Get-Content installer.iss -Raw) -replace '#define MyAppVersion "[^"]*"', "#define MyAppVersion `"$v`"" |
             Set-Content installer.iss -Encoding utf8
           $v4 = "$v.0"; if (($v -split '\.').Count -ge 3) { $v4 = "$v.0" } else { $v4 = "$v.0.0.0" }
@@ -66,12 +66,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build .exe (PyInstaller, chế độ onedir)
-        run: pyinstaller slh_tool.spec
+        run: pyinstaller slhtool.spec
 
       - name: Đóng gói bản "portable" (giải nén ra chạy luôn, không cần cài)
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\slh_tool\*" -DestinationPath "slh_tool_portable.zip"
+          Compress-Archive -Path "dist\slhtool\*" -DestinationPath "slhtool_portable.zip"
 
       - name: Cài Inno Setup
         run: choco install innosetup -y --no-progress
@@ -87,14 +87,14 @@ jobs:
         with:
           files: |
             Output/SLHTool_Setup.exe
-            slh_tool_portable.zip
+            slhtool_portable.zip
           generate_release_notes: true
 
       - name: Lưu file build (khi chạy thử bằng "Run workflow", không tạo Release)
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: slh_tool-build-thu
+          name: slhtool-build-thu
           path: |
             Output/SLHTool_Setup.exe
-            slh_tool_portable.zip
+            slhtool_portable.zip

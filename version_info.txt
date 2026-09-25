@@ -1,5 +1,5 @@
 # Thông tin phiên bản Windows gắn vào file .exe (xem khi chuột-phải > Properties > Details).
-# Phải khớp với APP_VERSION trong slh_tool.py — nếu đổi 1 chỗ thì đổi luôn chỗ kia.
+# Phải khớp với APP_VERSION trong slhtool.py — nếu đổi 1 chỗ thì đổi luôn chỗ kia.
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(1, 0, 0, 0),
@@ -19,8 +19,8 @@ VSVersionInfo(
         [StringStruct(u'CompanyName', u''),
         StringStruct(u'FileDescription', u'Công cụ làm truyện chữ: lọc tên, dịch, tạo EPUB'),
         StringStruct(u'FileVersion', u'1.0.0.0'),
-        StringStruct(u'InternalName', u'slh_tool'),
-        StringStruct(u'OriginalFilename', u'slh_tool.exe'),
+        StringStruct(u'InternalName', u'slhtool'),
+        StringStruct(u'OriginalFilename', u'slhtool.exe'),
         StringStruct(u'ProductName', u'SLH Tool'),
         StringStruct(u'ProductVersion', u'1.0.0.0')])
       ]),

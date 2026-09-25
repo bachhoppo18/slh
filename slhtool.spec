@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Build bằng lệnh:  pyinstaller slh_tool.spec
+# Build bằng lệnh:  pyinstaller slhtool.spec
 #
 # Chế độ --onedir (KHÔNG dùng --onefile): mở app nhanh hơn hẳn onefile (onefile phải
 # tự giải nén ra thư mục tạm mỗi lần mở) và ít bị phần mềm diệt virus / SmartScreen
-# báo nhầm hơn. Kết quả nằm trong thư mục dist/slh_tool/ gồm slh_tool.exe
+# báo nhầm hơn. Kết quả nằm trong thư mục dist/slhtool/ gồm slhtool.exe
 # và các file .dll/.pyd đi kèm — Inno Setup (installer.iss) sẽ đóng gói cả thư mục
 # này thành 1 file cài đặt duy nhất để đưa cho người dùng.
 
@@ -13,7 +13,7 @@ from PyInstaller.utils.hooks import collect_submodules
 block_cipher = None
 
 a = Analysis(
-    ['slh_tool.py'],
+    ['slhtool.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -44,7 +44,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='slh_tool',
+    name='slhtool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -62,5 +62,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='slh_tool',
+    name='slhtool',
 )

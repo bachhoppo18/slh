@@ -1,5 +1,5 @@
 ; installer.iss — build bằng Inno Setup (ISCC.exe installer.iss) SAU KHI đã có
-; thư mục dist\slh_tool\ (từ bước `pyinstaller slh_tool.spec`).
+; thư mục dist\slhtool\ (từ bước `pyinstaller slhtool.spec`).
 ; Kết quả: file  Output\SLHTool_Setup.exe  — đưa file này cho người dùng tải về.
 ;
 ; Cài vào thư mục riêng của người dùng (không phải Program Files) nên KHÔNG cần
@@ -7,9 +7,9 @@
 
 #define MyAppName "SLH Tool"
 #define MyAppVersion "1.0.0"
-; ^ PHẢI khớp APP_VERSION trong slh_tool.py — đổi 1 chỗ thì đổi luôn 2 chỗ kia
+; ^ PHẢI khớp APP_VERSION trong slhtool.py — đổi 1 chỗ thì đổi luôn 2 chỗ kia
 ;   (chỗ kia là version_info.txt).
-#define MyAppExeName "slh_tool.exe"
+#define MyAppExeName "slhtool.exe"
 
 [Setup]
 ; AppId CỐ ĐỊNH — KHÔNG BAO GIỜ ĐỔI GUID NÀY Ở CÁC BẢN SAU, kể cả khi đổi tên app.
@@ -42,7 +42,7 @@ Name: "desktopicon"; Description: "Tạo biểu tượng ngoài Desktop"; GroupD
 
 [Files]
 ; Toàn bộ thư mục onedir mà PyInstaller build ra (exe + các .dll/.pyd đi kèm)
-Source: "dist\slh_tool\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\slhtool\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
