@@ -1,0 +1,29 @@
+# Thông tin phiên bản Windows gắn vào file .exe (xem khi chuột-phải > Properties > Details).
+# Phải khớp với APP_VERSION trong van_ban_tool.py — nếu đổi 1 chỗ thì đổi luôn chỗ kia.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        u'042a04b0',   # tiếng Việt (0x042a), Unicode (04b0)
+        [StringStruct(u'CompanyName', u''),
+        StringStruct(u'FileDescription', u'Công cụ làm truyện chữ: lọc tên, dịch, tạo EPUB'),
+        StringStruct(u'FileVersion', u'1.0.0.0'),
+        StringStruct(u'InternalName', u'van_ban_tool'),
+        StringStruct(u'OriginalFilename', u'van_ban_tool.exe'),
+        StringStruct(u'ProductName', u'Van Ban Tool'),
+        StringStruct(u'ProductVersion', u'1.0.0.0')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [0x042a, 1200])])
+  ]
+)

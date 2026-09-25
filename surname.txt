@@ -1,0 +1,4 @@
+# Mỗi dòng 1 từ/cụm từ CẦN LOẠI khỏi kết quả lọc tên (vd. chức danh, đại từ hay bị nhận nhầm là tên).
+# Dòng bắt đầu bằng # hoặc để trống sẽ được bỏ qua.
+huynh đệ
+sư phụ

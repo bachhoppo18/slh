@@ -1,0 +1,100 @@
+# Tự động build file .exe + bộ cài Windows mỗi khi bạn đẩy 1 "tag" dạng v1.0.0.
+#
+# Cách phát hành bản mới (làm trên máy bạn, không cần Windows):
+#   git add -A
+#   git commit -m "Bản 1.0.1: sửa lỗi ..."
+#   git tag v1.0.1
+#   git push origin main --tags
+#
+# Sau khoảng 3-5 phút, vào tab "Actions" của repo xem tiến trình build. Xong sẽ
+# tự tạo 1 "Release" mới ở tab "Releases" kèm 2 file cho người dùng tải:
+#   - VanBanTool_Setup.exe        (bộ cài, khuyên dùng)
+#   - van_ban_tool_portable.zip   (giải nén ra chạy luôn, không cần cài)
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:      # cho phép bấm nút "Run workflow" trên GitHub để build thử, không cần tạo tag
+
+permissions:
+  contents: write          # cần quyền này để tạo Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Xác định số phiên bản từ tag Git
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}" -replace '^v', ''
+          } else {
+            $v = "0.0.0-dev"    # chạy tay qua "Run workflow", không phải bản phát hành thật
+          }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "Phiên bản build: $v"
+
+      - name: Đồng bộ số phiên bản vào mã nguồn + bộ cài
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          (Get-Content van_ban_tool.py -Raw) -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$v`"" |
+            Set-Content van_ban_tool.py -Encoding utf8
+          (Get-Content installer.iss -Raw) -replace '#define MyAppVersion "[^"]*"', "#define MyAppVersion `"$v`"" |
+            Set-Content installer.iss -Encoding utf8
+          $v4 = "$v.0"; if (($v -split '\.').Count -ge 3) { $v4 = "$v.0" } else { $v4 = "$v.0.0.0" }
+          $parts = ($v -split '\.') + @('0','0','0','0')
+          $filevers = "$($parts[0]), $($parts[1]), $($parts[2]), 0"
+          (Get-Content version_info.txt -Raw) `
+            -replace 'filevers=\([^)]*\)', "filevers=($filevers)" `
+            -replace 'prodvers=\([^)]*\)', "prodvers=($filevers)" `
+            -replace "FileVersion', u'[^']*'", "FileVersion', u'$v.0'" `
+            -replace "ProductVersion', u'[^']*'", "ProductVersion', u'$v.0'" |
+            Set-Content version_info.txt -Encoding utf8
+
+      - name: Cài thư viện Python
+        run: pip install -r requirements.txt
+
+      - name: Build .exe (PyInstaller, chế độ onedir)
+        run: pyinstaller van_ban_tool.spec
+
+      - name: Đóng gói bản "portable" (giải nén ra chạy luôn, không cần cài)
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\van_ban_tool\*" -DestinationPath "van_ban_tool_portable.zip"
+
+      - name: Cài Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build bộ cài (Setup.exe)
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Tạo GitHub Release kèm 2 file cho người dùng tải
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Output/VanBanTool_Setup.exe
+            van_ban_tool_portable.zip
+          generate_release_notes: true
+
+      - name: Lưu file build (khi chạy thử bằng "Run workflow", không tạo Release)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: van_ban_tool-build-thu
+          path: |
+            Output/VanBanTool_Setup.exe
+            van_ban_tool_portable.zip
