@@ -34,7 +34,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
-Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
