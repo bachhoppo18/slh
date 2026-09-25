@@ -62,5 +62,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='van_ban_tool',
+    name='slh_tool',
 )

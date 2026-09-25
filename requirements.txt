@@ -1,4 +1,4 @@
-# Thư viện cần để CHẠY van_ban_tool.py và để ĐÓNG GÓI ra file .exe.
+# Thư viện cần để CHẠY slh_tool.py và để ĐÓNG GÓI ra file .exe.
 # tkinter đã có sẵn trong Python cài từ python.org cho Windows, không cần cài thêm.
 Pillow==12.3.0
 mammoth==1.12.2

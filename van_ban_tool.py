@@ -76,8 +76,8 @@ FONT_MONO = ("Consolas", 10)      # chỉ dùng cho nhật ký (log)
 #  PHIÊN BẢN & CẬP NHẬT — ĐIỀN LẠI 2 DÒNG NÀY SAU KHI TẠO REPO GITHUB CỦA BẠN
 # ══════════════════════════════════════════════════════════════════════════
 APP_VERSION = "1.0.0"
-GITHUB_REPO = "TEN-BAN/vanban-tool"          # repo chứa mã nguồn + bản .exe (GitHub Releases)
-DATA_REPO   = "TEN-BAN/vanban-tool-data"     # repo riêng, CHỈ chứa danh sách loại trừ — bạn sửa hoài ở đây
+GITHUB_REPO = "bachhoppo18/slh"          # repo chứa mã nguồn + bản .exe (GitHub Releases)
+DATA_REPO   = "bachhoppo18/slh"          # repo riêng, CHỈ chứa danh sách loại trừ — bạn sửa hoài ở đây
 DATA_BRANCH = "main"
 
 HANLP_PACK_URL = f"https://github.com/{GITHUB_REPO}/releases/download/hanlp-pack-v1/hanlp_pack.zip"
@@ -99,12 +99,12 @@ def _bundled_dir():
 def _app_data_dir():
     """Thư mục GHI DỮ LIỆU của app: cấu hình, từ điển, danh sách loại trừ, gói HanLP.
 
-    Windows  : %APPDATA%\\VanBanTool   (vd. C:\\Users\\Ten\\AppData\\Roaming\\VanBanTool)
-    Khác     : ~/.vanbantool           (dùng khi chạy thử bằng Python trên Linux/Mac)
+    Windows  : %APPDATA%\SLHTool   (vd. C:\\Users\\Ten\\AppData\\Roaming\\SLHTool)
+    Khác     : ~/.slhtool           (dùng khi chạy thử bằng Python trên Linux/Mac)
     Luôn ghi được dù EXE được cài vào Program Files.
     """
     appdata = os.environ.get("APPDATA")
-    d = os.path.join(appdata, "VanBanTool") if appdata else os.path.join(os.path.expanduser("~"), ".vanbantool")
+    d = os.path.join(appdata, "SLHTool") if appdata else os.path.join(os.path.expanduser("~"), ".slhtool")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -193,7 +193,7 @@ def _version_tuple(v):
 
 def check_for_update():
     """Trả về (có_bản_mới, phiên_bản_mới, url_trang_release) hoặc (False, None, None)."""
-    req = urllib.request.Request(UPDATE_API_URL, headers={"User-Agent": "VanBanTool", "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(UPDATE_API_URL, headers={"User-Agent": "SLHTool", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=15) as r:
         data = json.load(r)
     tag = data.get("tag_name") or ""
@@ -226,7 +226,7 @@ def download_hanlp_pack(progress=None):
     progress = progress or (lambda a, b, s: None)
     os.makedirs(APP_DATA_DIR, exist_ok=True)
     zip_path = os.path.join(APP_DATA_DIR, "hanlp_pack_download.zip")
-    req = urllib.request.Request(HANLP_PACK_URL, headers={"User-Agent": "VanBanTool"})
+    req = urllib.request.Request(HANLP_PACK_URL, headers={"User-Agent": "SLHTool"})
     with urllib.request.urlopen(req, timeout=60) as r, open(zip_path, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         got = 0
@@ -634,7 +634,7 @@ def capitalize_first(text):
 
 # ── Chế độ HanLP (chính xác cao, cần Python + hanlp cài trên máy) ──
 HANLP_WORKER_SRC = r'''
-# Worker HanLP - chay boi VanBanTool qua subprocess
+# Worker HanLP - chay boi SLHTool qua subprocess
 import sys, re, json
 from collections import Counter
 
