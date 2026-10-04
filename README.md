@@ -8,7 +8,7 @@ Word hay các công cụ trung gian khác.
 
 Vào **[Releases](https://github.com/bachhoppo18/slh/releases/latest)**, tải 1 trong 2 file:
 
-- **`SLHTool_Setup.exe`** *(khuyên dùng)* — bộ cài, có Start Menu, gỡ cài đặt được, tự động cập nhật.
+- **`SLHTool_Setup.exe`** *(khuyên dùng)* — bộ cài, có Start Menu, gỡ cài đặt được; có thể tự cài bản mới khi xác nhận cập nhật trong app.
 - **`slhtool_portable.zip`** — giải nén ra là chạy luôn `slhtool.exe`, không cần cài, hợp máy không cho cài phần mềm.
 
 Không cần tài khoản Windows quyền Admin — cài vào thư mục riêng của người
@@ -70,9 +70,10 @@ dùng, không đụng tới Program Files.
 
 ## Cập nhật app
 
-App tự kiểm tra bản mới mỗi khi mở. Có bản mới sẽ hỏi **"Có bản cập nhật —
-mở trang tải về?"**, bấm **Có** sẽ mở đúng trang Releases, tải bộ cài mới về
-cài đè lên (không mất dữ liệu, không cần gỡ bản cũ trước).
+App tự kiểm tra bản mới mỗi khi mở. Với bản cài `SLHTool_Setup.exe`, app có thể
+tải bộ cài mới, xác minh file, cài đè im lặng và mở lại app sau khi bạn xác nhận.
+Cấu hình và bộ tên trong `%APPDATA%\SLHTool` được giữ nguyên. Bản portable vẫn
+cập nhật bằng cách tải gói mới từ trang Releases.
 
 ## Tài khoản
 

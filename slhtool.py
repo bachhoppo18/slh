@@ -16,6 +16,7 @@ import os
 import re
 import csv
 import sys
+import hashlib
 import shutil
 import tempfile
 import subprocess
@@ -60,6 +61,7 @@ DATA_BRANCH = "main"
 
 HANLP_PACK_URL = f"https://github.com/{GITHUB_REPO}/releases/download/hanlp-pack-v1/hanlp_pack.zip"
 UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+UPDATE_ASSET_NAME = "SLHTool_Setup.exe"
 DATA_RAW_BASE = f"https://raw.githubusercontent.com/{DATA_REPO}/{DATA_BRANCH}/slh-data/"
 
 
@@ -188,16 +190,82 @@ def _version_tuple(v):
     return tuple(int(p) for p in parts) or (0,)
 
 
+def _release_update_info(data):
+    tag = data.get("tag_name") or ""
+    release_url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+    if _version_tuple(tag) <= _version_tuple(APP_VERSION):
+        return False, tag, release_url, None, 0, None
+
+    asset = next((item for item in data.get("assets", [])
+                  if item.get("name") == UPDATE_ASSET_NAME), None)
+    if asset is None:
+        return True, tag, release_url, None, 0, None
+    asset_url = asset.get("browser_download_url")
+    asset_size = int(asset.get("size") or 0)
+    asset_digest = asset.get("digest") or ""
+    if (not asset_url or asset_size <= 0
+            or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", asset_digest)):
+        return True, tag, release_url, None, 0, None
+    return (True, tag, release_url, asset.get("browser_download_url"),
+            asset_size, asset_digest)
+
+
 def check_for_update():
-    """Trả về (có_bản_mới, phiên_bản_mới, url_trang_release) hoặc (False, None, None)."""
+    """Lấy thông tin release mới nhất và asset bộ cài nếu có."""
     req = urllib.request.Request(UPDATE_API_URL, headers={"User-Agent": "SLHTool", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=15) as r:
         data = json.load(r)
-    tag = data.get("tag_name") or ""
-    url = data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
-    if _version_tuple(tag) > _version_tuple(APP_VERSION):
-        return True, tag, url
-    return False, tag, url
+    return _release_update_info(data)
+
+
+def download_update_installer(url, tag, expected_size, digest=None, progress=None, cancel_event=None):
+    """Tải và xác minh bộ cài GitHub Release vào thư mục dữ liệu người dùng."""
+    prefix = f"https://github.com/{GITHUB_REPO}/releases/download/"
+    if not url or not url.startswith(prefix):
+        raise ValueError("URL bộ cài không thuộc GitHub Releases của ứng dụng.")
+    if expected_size <= 0:
+        raise ValueError("Release không cung cấp kích thước bộ cài hợp lệ.")
+
+    safe_tag = re.sub(r"[^A-Za-z0-9._-]", "_", tag or "latest")
+    dest = os.path.join(APP_DATA_DIR, "updates", f"SLHTool_Setup-{safe_tag}.exe")
+    tmp = dest + ".download"
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "SLHTool"})
+    hasher = hashlib.sha256()
+    received = 0
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response, open(tmp, "wb") as output:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    raise InterruptedError("Đã hủy cập nhật.")
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                hasher.update(chunk)
+                received += len(chunk)
+                if progress:
+                    progress(received, expected_size)
+
+        if received != expected_size:
+            raise ValueError(f"Tải bộ cài chưa đầy đủ ({received}/{expected_size} byte).")
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest or ""):
+            raise ValueError("Release không cung cấp SHA-256 hợp lệ cho bộ cài.")
+        expected_hash = digest.partition(":")[2]
+        if hasher.hexdigest().lower() != expected_hash.lower():
+            raise ValueError("SHA-256 bộ cài không khớp với GitHub Release.")
+        os.replace(tmp, dest)
+        return dest
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _is_installed_app():
+    return os.path.isfile(os.path.join(_bundled_dir(), "unins000.exe"))
 
 
 def check_for_update_async(on_result):
@@ -205,7 +273,7 @@ def check_for_update_async(on_result):
         try:
             result = check_for_update()
         except Exception as e:
-            result = (False, None, str(e))
+            result = (False, None, str(e), None, 0, None)
         try:
             on_result(*result)
         except Exception:
@@ -5332,16 +5400,112 @@ class App(tk.Tk):
         sync_admin_lists_async(self._admin_list_sync_results.put)
         check_for_update_async(self._on_update_checked)
 
-    def _on_update_checked(self, has_new, tag, url):
+    def _on_update_checked(self, has_new, tag, release_url, installer_url, installer_size, installer_digest):
         if not has_new:
             return
+
         def ask():
+            if _is_installed_app():
+                if installer_url:
+                    if messagebox.askyesno(
+                            "Có bản cập nhật",
+                            f"Đã có bản mới {tag} (bạn đang dùng v{APP_VERSION}).\n\n"
+                            "Tải và cài tự động ngay? Ứng dụng sẽ đóng rồi tự mở lại.", parent=self):
+                        self._begin_auto_update(
+                            tag, installer_url, installer_size, installer_digest, release_url)
+                elif messagebox.askyesno(
+                        "Chưa thể cập nhật tự động",
+                        f"Release {tag} chưa có bộ cài Setup với SHA-256 hợp lệ.\n\n"
+                        "Mở trang Release để kiểm tra/tải thủ công?", parent=self):
+                    webbrowser.open(release_url)
+                return
             if messagebox.askyesno(
                     "Có bản cập nhật",
                     f"Đã có bản mới {tag} (bạn đang dùng v{APP_VERSION}).\n\n"
-                    "Mở trang tải về?", parent=self):
-                webbrowser.open(url)
+                    "Bản portable cần tải thủ công. Mở trang Releases?", parent=self):
+                webbrowser.open(release_url)
+
         self.after(0, ask)
+
+    def _begin_auto_update(self, tag, installer_url, installer_size, installer_digest, release_url):
+        dialog = tk.Toplevel(self)
+        dialog.title("Đang cập nhật SLH Tool")
+        dialog.geometry("440x130")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill=tk.BOTH, expand=True)
+        status = tk.StringVar(value=f"Đang tải bộ cài phiên bản {tag}...")
+        ttk.Label(frame, textvariable=status).pack(anchor="w", pady=(0, 8))
+        bar = ttk.Progressbar(frame, maximum=max(installer_size, 1), mode="determinate")
+        bar.pack(fill=tk.X, pady=(0, 10))
+        cancel_button = ttk.Button(frame, text="Hủy")
+        cancel_button.pack(anchor="e")
+        cancel_event = threading.Event()
+        self._update_cancel_event = cancel_event
+
+        def cancel():
+            cancel_event.set()
+            cancel_button.config(state="disabled")
+            status.set("Đang hủy tải xuống...")
+
+        cancel_button.config(command=cancel)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+
+        def progress(received, total):
+            def update_ui():
+                if dialog.winfo_exists():
+                    bar["value"] = received
+                    status.set(f"Đang tải: {received / 1_048_576:.1f} / {total / 1_048_576:.1f} MB")
+            try:
+                self.after(0, update_ui)
+            except (tk.TclError, RuntimeError):
+                pass
+
+        def worker():
+            try:
+                installer_path = download_update_installer(
+                    installer_url, tag, installer_size, installer_digest,
+                    progress=progress, cancel_event=cancel_event,
+                )
+            except InterruptedError:
+                self.after(0, dialog.destroy)
+                return
+            except Exception as exc:
+                self.after(0, lambda error=exc: self._auto_update_failed(dialog, error, release_url))
+                return
+            self.after(0, lambda: self._launch_update_installer(dialog, installer_path))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _auto_update_failed(self, dialog, error, release_url):
+        if dialog.winfo_exists():
+            dialog.destroy()
+        if self.winfo_exists():
+            open_release = messagebox.askyesno(
+                "Không cập nhật được",
+                f"Không thể tải hoặc xác minh bộ cài mới:\n{error}\n\n"
+                "Ứng dụng hiện tại vẫn được giữ nguyên. Mở trang Release để tải thủ công?",
+                parent=self,
+            )
+            if open_release:
+                webbrowser.open(release_url)
+
+    def _launch_update_installer(self, dialog, installer_path):
+        if dialog.winfo_exists():
+            dialog.destroy()
+        log_path = os.path.join(APP_DATA_DIR, "update_install.log")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        try:
+            subprocess.Popen(
+                [installer_path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                 "/SP-", "/CLOSEAPPLICATIONS", f"/LOG={log_path}"],
+                cwd=_bundled_dir(), creationflags=flags,
+            )
+        except Exception as exc:
+            messagebox.showerror("Không chạy được bộ cài", str(exc), parent=self)
+            return
+        self.destroy()
 
 if __name__ == "__main__":
     app = App()

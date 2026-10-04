@@ -32,6 +32,8 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -50,6 +52,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Mở {#MyAppName} ngay"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: IsSilentInstall
+
+[Code]
+function IsSilentInstall: Boolean;
+begin
+  Result := WizardSilent;
+end;
 
 [UninstallDelete]
 ; KHÔNG xoá %APPDATA%\SLHTool khi gỡ cài đặt — đó là nơi lưu cấu hình, danh
