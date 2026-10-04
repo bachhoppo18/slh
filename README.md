@@ -74,43 +74,19 @@ App tự kiểm tra bản mới mỗi khi mở. Có bản mới sẽ hỏi **"C�
 mở trang tải về?"**, bấm **Có** sẽ mở đúng trang Releases, tải bộ cài mới về
 cài đè lên (không mất dữ liệu, không cần gỡ bản cũ trước).
 
-## Tài khoản và quản trị dữ liệu
+## Tài khoản
 
-Ứng dụng cần kết nối tới **SLH Admin API** để đăng nhập khi mở. Admin API là
-dịch vụ riêng, giữ GitHub token ở máy chủ và ghi dữ liệu bổ sung vào
-`slh-data/admin/` trong repository; không đưa GitHub token vào EXE.
+Ứng dụng không cần Admin API, URL máy chủ hay tài khoản trực tuyến. Đăng nhập
+cục bộ lần đầu bằng tài khoản `admin`, mật khẩu `123456`; chọn **Đổi mật khẩu**
+ngay trên cửa sổ đăng nhập để đặt mật khẩu riêng (tối thiểu 8 ký tự).
 
-### Chạy Admin API
+Thông tin đăng nhập được lưu tại `%APPDATA%\SLHTool\admin_config.json`; ứng dụng
+chỉ lưu mã băm mật khẩu, không lưu mật khẩu dạng văn bản. Đây là khóa truy cập
+cục bộ tiện dụng, không phải cơ chế bảo mật máy chủ: mật khẩu mặc định có trong
+bản ứng dụng, vì vậy hãy đổi mật khẩu trước khi chia sẻ hoặc dùng chung máy.
 
-Trên máy chủ Linux có HTTPS reverse proxy, clone repository rồi cài và chạy:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r admin-requirements.txt
-uvicorn admin_server:app --host 127.0.0.1 --port 8000
-```
-
-Cấu hình các biến môi trường trước khi chạy:
-
-- `SLH_GITHUB_TOKEN`: GitHub fine-grained token chỉ cấp quyền **Contents: Read and write** cho repository dữ liệu.
-- `SLH_GITHUB_REPO`: repository đích, mặc định `bachhoppo18/slh`.
-- `SLH_GITHUB_BRANCH`: nhánh cập nhật, mặc định `main`.
-- `SLH_AUTH_SECRET`: chuỗi bí mật ngẫu nhiên tối thiểu 32 ký tự để ký phiên đăng nhập.
-- `SLH_ADMIN_USERNAME` và `SLH_ADMIN_PASSWORD`: tài khoản admin đầu tiên; mật khẩu tối thiểu 12 ký tự.
-- `SLH_DB_PATH`: đường dẫn SQLite trên ổ đĩa bền vững của máy chủ, mặc định `slh-admin.sqlite3`.
-
-Chỉ lần chạy đầu tiên tạo admin từ hai biến bootstrap. Tài khoản user được admin
-cấp trong tab **Quản trị** của ứng dụng. Bảo vệ API bằng HTTPS và giữ ổ đĩa
-SQLite tồn tại qua các lần deploy/restart.
-
-### Đăng nhập và đồng bộ
-
-Lần đầu mở app, nhập URL HTTPS của Admin API và tài khoản được cấp. App xác thực
-và tải các mục bổ sung mỗi lần đăng nhập; danh sách từ điển nền vẫn lấy từ các
-file GitHub hiện có. Admin có thể tìm/xem HanViet, Name, VP, blacklist, thêm mục
-lên GitHub và cấp user ngay trong tab **Quản trị**. Blacklist thêm từ API được
-hợp nhất với danh sách máy chủ cũ, không ghi đè danh sách riêng trên máy.
+Các danh sách nền vẫn được đồng bộ trực tiếp từ repository dữ liệu; danh sách
+riêng được lưu trên máy và không bị ghi đè.
 
 ## Dữ liệu của bạn được lưu ở đâu
 

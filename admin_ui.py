@@ -1,7 +1,10 @@
 """Login and administrator views for the desktop application."""
 import json
+import hashlib
+import hmac
 import os
 import queue
+import secrets
 import threading
 import tkinter as tk
 from itertools import islice
@@ -18,6 +21,72 @@ DATASET_LABELS = {
     "blacklist": "Blacklist",
 }
 LABEL_DATASETS = {label: key for key, label in DATASET_LABELS.items()}
+LOCAL_ADMIN_USERNAME = "admin"
+LOCAL_ADMIN_DEFAULT_PASSWORD = "123456"
+LOCAL_ADMIN_PASSWORD_ITERATIONS = 310_000
+
+
+def _password_digest(password, salt):
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, LOCAL_ADMIN_PASSWORD_ITERATIONS
+    )
+
+
+def _write_local_admin(config_path, salt, password):
+    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
+    temporary_path = config_path + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as file:
+        json.dump({
+            "username": LOCAL_ADMIN_USERNAME,
+            "password_salt": salt.hex(),
+            "password_hash": _password_digest(password, salt).hex(),
+        }, file)
+    os.replace(temporary_path, config_path)
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+
+
+def initialize_local_admin(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            config = json.load(file)
+    except FileNotFoundError:
+        config = None
+    if config is not None and not isinstance(config, dict):
+        raise ValueError("Tệp tài khoản cục bộ không hợp lệ.")
+    if config is None or not all(key in config for key in ("password_salt", "password_hash")):
+        _write_local_admin(config_path, secrets.token_bytes(16), LOCAL_ADMIN_DEFAULT_PASSWORD)
+        return
+    try:
+        salt = bytes.fromhex(config["password_salt"])
+        digest = bytes.fromhex(config["password_hash"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Tệp tài khoản cục bộ không hợp lệ.") from exc
+    if config.get("username") != LOCAL_ADMIN_USERNAME or len(salt) != 16 or len(digest) != 32:
+        raise ValueError("Tệp tài khoản cục bộ không hợp lệ.")
+
+
+def verify_local_admin(config_path, username, password):
+    if username != LOCAL_ADMIN_USERNAME:
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as file:
+            config = json.load(file)
+        salt = bytes.fromhex(config["password_salt"])
+        expected = bytes.fromhex(config["password_hash"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return hmac.compare_digest(_password_digest(password, salt), expected)
+
+
+def change_local_admin_password(config_path, current_password, new_password):
+    if len(new_password) < 8:
+        raise ValueError("Mật khẩu mới cần có ít nhất 8 ký tự.")
+    if not verify_local_admin(config_path, LOCAL_ADMIN_USERNAME, current_password):
+        raise ValueError("Mật khẩu hiện tại không đúng.")
+    _write_local_admin(config_path, secrets.token_bytes(16), new_password)
 
 
 class AdminLoginDialog(tk.Toplevel):
@@ -26,88 +95,100 @@ class AdminLoginDialog(tk.Toplevel):
         self.parent = parent
         self.config_path = config_path
         self.result = None
-        self.messages = queue.Queue()
+        self.auth_error = None
+        try:
+            initialize_local_admin(config_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.auth_error = str(exc)
         self.title("Đăng nhập SLH Tool")
-        self.geometry("390x245")
+        self.geometry("390x220")
         self.resizable(False, False)
-        self.transient(parent)
+        if parent.state() != "withdrawn":
+            self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
-        config = {}
-        try:
-            with open(config_path, "r", encoding="utf-8") as file:
-                config = json.load(file)
-        except (OSError, ValueError):
-            pass
-        self.url_var = tk.StringVar(value=os.environ.get("SLH_ADMIN_API_URL", config.get("api_url", "")))
-        self.username_var = tk.StringVar()
         self.password_var = tk.StringVar()
 
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="Địa chỉ máy chủ:").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.url_var, width=42).grid(row=1, column=0, sticky="ew")
-        ttk.Label(frame, text="Tên đăng nhập:").grid(row=2, column=0, sticky="w", pady=(8, 4))
-        ttk.Entry(frame, textvariable=self.username_var).grid(row=3, column=0, sticky="ew")
-        ttk.Label(frame, text="Mật khẩu:").grid(row=4, column=0, sticky="w", pady=(8, 4))
-        ttk.Entry(frame, textvariable=self.password_var, show="*").grid(row=5, column=0, sticky="ew")
-        self.status = ttk.Label(frame, text="", wraplength=350)
-        self.status.grid(row=6, column=0, sticky="w", pady=(8, 2))
+        ttk.Label(frame, text=f"Tài khoản: {LOCAL_ADMIN_USERNAME}").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Mật khẩu:").grid(row=1, column=0, sticky="w", pady=(8, 4))
+        password_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
+        password_entry.grid(row=2, column=0, sticky="ew")
+        password_entry.bind("<Return>", lambda _event: self._login())
+        ttk.Label(frame, text="Mật khẩu mặc định lần đầu: 123456", style="Muted.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(6, 0)
+        )
+        self.status = ttk.Label(frame, text=self.auth_error or "", wraplength=350)
+        self.status.grid(row=4, column=0, sticky="w", pady=(6, 2))
+        ttk.Button(frame, text="Đổi mật khẩu", command=self._change_password).grid(
+            row=5, column=0, sticky="w", pady=(6, 0)
+        )
         self.login_button = ttk.Button(frame, text="Đăng nhập", command=self._login)
-        self.login_button.grid(row=7, column=0, sticky="e", pady=(6, 0))
+        self.login_button.grid(row=5, column=0, sticky="e", pady=(6, 0))
         frame.columnconfigure(0, weight=1)
         self.grab_set()
-        self.after(100, self._poll_messages)
 
     def _login(self):
-        url = self.url_var.get().strip().rstrip("/")
-        username = self.username_var.get().strip()
-        password = self.password_var.get()
-        parsed_url = urlparse(url)
-        local_hosts = {"localhost", "127.0.0.1", "::1"}
-        if parsed_url.scheme != "https" and not (parsed_url.scheme == "http" and parsed_url.hostname in local_hosts):
-            self.status.config(text="Máy chủ cần dùng HTTPS (HTTP chỉ dùng được trên localhost).")
+        if self.auth_error:
+            self.status.config(text=self.auth_error)
             return
-        if not username or not password:
-            self.status.config(text="Nhập tên đăng nhập và mật khẩu.")
+        if not verify_local_admin(self.config_path, LOCAL_ADMIN_USERNAME, self.password_var.get()):
+            self.status.config(text="Mật khẩu không đúng.")
             return
-        self.login_button.config(state="disabled")
-        self.status.config(text="Đang xác thực và đồng bộ dữ liệu...")
-
-        def worker():
-            try:
-                client = AdminClient(url)
-                client.login(username, password)
-                datasets = client.get_datasets()
-                self.messages.put((client, datasets, None))
-            except Exception as exc:
-                self.messages.put((None, None, str(exc)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _poll_messages(self):
-        try:
-            client, datasets, error = self.messages.get_nowait()
-        except queue.Empty:
-            if self.winfo_exists():
-                self.after(100, self._poll_messages)
-            return
-        self.login_button.config(state="normal")
-        if error:
-            self.status.config(text=error)
-            self.after(100, self._poll_messages)
-            return
-        self.result = (client, datasets)
-        try:
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as file:
-                json.dump({"api_url": self.url_var.get().strip().rstrip("/")}, file, ensure_ascii=False)
-        except OSError:
-            pass
+        self.result = True
         self.destroy()
+
+    def _change_password(self):
+        if self.auth_error:
+            self.status.config(text=self.auth_error)
+            return
+        ChangePasswordDialog(self, self.config_path)
 
     def _cancel(self):
         self.result = None
+        self.destroy()
+
+
+class ChangePasswordDialog(tk.Toplevel):
+    def __init__(self, parent, config_path):
+        super().__init__(parent)
+        self.config_path = config_path
+        self.title("Đổi mật khẩu admin")
+        self.geometry("390x250")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        self.current_password = tk.StringVar()
+        self.new_password = tk.StringVar()
+        self.confirm_password = tk.StringVar()
+        fields = (
+            ("Mật khẩu hiện tại:", self.current_password),
+            ("Mật khẩu mới (ít nhất 8 ký tự):", self.new_password),
+            ("Nhập lại mật khẩu mới:", self.confirm_password),
+        )
+        for row, (label, variable) in enumerate(fields):
+            ttk.Label(frame, text=label).grid(row=row * 2, column=0, sticky="w", pady=(4, 2))
+            entry = ttk.Entry(frame, textvariable=variable, show="*")
+            entry.grid(row=row * 2 + 1, column=0, sticky="ew")
+        self.status = ttk.Label(frame, text="", wraplength=350)
+        self.status.grid(row=6, column=0, sticky="w", pady=(6, 2))
+        ttk.Button(frame, text="Lưu mật khẩu", command=self._save).grid(row=7, column=0, sticky="e", pady=(6, 0))
+        frame.columnconfigure(0, weight=1)
+
+    def _save(self):
+        if self.new_password.get() != self.confirm_password.get():
+            self.status.config(text="Hai mật khẩu mới không khớp.")
+            return
+        try:
+            change_local_admin_password(
+                self.config_path, self.current_password.get(), self.new_password.get()
+            )
+        except (OSError, ValueError) as exc:
+            self.status.config(text=str(exc))
+            return
         self.destroy()
 
 

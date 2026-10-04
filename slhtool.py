@@ -26,8 +26,7 @@ from collections import Counter
 from threading import Thread
 import threading
 import webbrowser
-from admin_client import AdminClient, AdminApiError
-from admin_ui import AdminLoginDialog, AdminPanel
+from admin_ui import AdminLoginDialog
 
 # ── Giao diện: bảng màu xanh lá + hồng pastel (sửa ở đây, toàn app đổi theo) ──
 THEME = {
@@ -5226,8 +5225,6 @@ class App(tk.Tk):
         if not login.result:
             self.after_idle(self.destroy)
             return
-        self.admin_client, datasets = login.result
-        self._apply_admin_datasets(datasets)
         self.deiconify()
 
         apply_theme(self)
@@ -5255,9 +5252,6 @@ class App(tk.Tk):
         nb.add(tab1, text="  👤 Lọc tên nhân vật  ")
         nb.add(tab2, text="  📚 Tạo & Gộp EPUB  ")
         nb.add(tab3, text="  🌐 Dịch Trung → Việt  ")
-        if self.admin_client.role == "admin":
-            self.admin_panel = AdminPanel(nb, self)
-            nb.add(self.admin_panel, text="  ⚙ Quản trị  ")
         tab1.translate_tab = tab3        # nút 'Dịch name' ở tab Lọc tên dùng engine + bộ tên của tab Dịch
         tab2.translate_tab = tab3        # nút 'Lấy văn bản từ Dịch QT' ở tab EPUB đọc output_text của tab Dịch
         self.title(f"{self.title()}  —  v{APP_VERSION}")
@@ -5278,24 +5272,6 @@ class App(tk.Tk):
         self.after(100, poll_admin_list_sync)
         sync_admin_lists_async(self._admin_list_sync_results.put)
         check_for_update_async(self._on_update_checked)
-
-    def _apply_admin_datasets(self, datasets):
-        global ADMIN_REMOTE_DATA
-        if not isinstance(datasets, dict):
-            raise AdminApiError("Máy chủ trả về danh sách dữ liệu không hợp lệ.")
-        for name in ("hanviet", "name", "vp"):
-            entries = datasets.get(name, {})
-            if not isinstance(entries, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in entries.items()):
-                raise AdminApiError(f"Danh sách {name} từ máy chủ không đúng định dạng.")
-        ADMIN_REMOTE_DATA = datasets
-        remote_blacklist = datasets.get("blacklist", [])
-        if not isinstance(remote_blacklist, list) or any(not isinstance(word, str) for word in remote_blacklist):
-            raise AdminApiError("Blacklist từ máy chủ không đúng định dạng.")
-        ADMIN_LIST_WORDS["blacklist"].update(_custom_list_expand("blacklist", remote_blacklist))
-        _refresh_custom_list_targets()
-        self.admin_datasets = datasets
-        if hasattr(self, "tab1"):
-            self.tab1._remove_blacklisted_from_results()
 
     def _on_update_checked(self, has_new, tag, url):
         if not has_new:
