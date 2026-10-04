@@ -1077,8 +1077,25 @@ class TabNames(ttk.Frame):
         for it in items:
             name, freq, group = (str(v) for v in self.name_tree.item(it, "values"))
             rows.append((name, freq, group))
+        target_set = tr.name_set_combo.get()
+        rows, existing_rows = exclude_names_already_in_set(
+            rows, tr.app_config["nameSets"].get(target_set, {})
+        )
+        if existing_rows:
+            existing_text = "\n".join(
+                f"• {row[0]} → {value}" for row, value in existing_rows
+            )
+            messagebox.showinfo(
+                "Name đã có trong bộ tên",
+                f"Đã loại {len(existing_rows)} name đã có khỏi lần dịch vào bộ “{target_set}”:\n\n"
+                f"{existing_text}",
+                parent=self,
+            )
+        if not rows:
+            return
         note = (f"{len(rows)} tên đang chọn trong kết quả lọc" if chosen
                 else f"toàn bộ {len(rows)} tên trong kết quả lọc")
+        note += f" • đã kiểm tra bộ “{target_set}”"
         NameTranslateDialog(self, tr, rows, note)
 
     def _show_name_context_menu(self, event):
@@ -1260,7 +1277,18 @@ class TabNames(ttk.Frame):
         self._hanlp_running = True
         self.hanlp_btn.config(state="disabled")
         min_freq = self.min_freq_var.get()
-        Thread(target=self._hanlp_worker, args=(text, min_freq), daemon=True).start()
+        target_set = ""
+        existing_names = set()
+        if self.translate_tab is not None:
+            target_set = self.translate_tab.name_set_combo.get()
+            existing_names = set(
+                self.translate_tab.app_config["nameSets"].get(target_set, {})
+            )
+        Thread(
+            target=self._hanlp_worker,
+            args=(text, min_freq, target_set, existing_names),
+            daemon=True,
+        ).start()
 
     def _hanlp_status(self, msg):
         self.after(0, lambda: self.status_var.set(msg))
@@ -1269,7 +1297,7 @@ class TabNames(ttk.Frame):
         self._hanlp_running = False
         self.after(0, lambda: self.hanlp_btn.config(state="normal"))
 
-    def _hanlp_worker(self, text, min_freq):
+    def _hanlp_worker(self, text, min_freq, target_set, existing_names):
         try:
             self._hanlp_status("Đang tìm Python + HanLP trên máy...")
             py = find_python_with_hanlp()
@@ -1331,7 +1359,10 @@ class TabNames(ttk.Frame):
 
             # === MỚI: gộp biến thể tên bị dính hư từ (萧景刚/萧景才/萧景先... → 萧景) ===
             counter = merge_name_variants(counter)
+            counter, excluded_names = filter_name_counter_by_set(counter, existing_names)
             self._last_counter = counter    # lưu lại để "Áp dụng lại" ngưỡng không cần chạy lại HanLP
+            self._last_excluded_count = len(excluded_names)
+            self._last_name_set = target_set
 
             results = sorted(
                 [(n, fr) for n, fr in counter.items() if fr >= min_freq],
@@ -1341,6 +1372,8 @@ class TabNames(ttk.Frame):
             # === MỚI: đề xuất ngưỡng tần suất tối thiểu dựa theo chính văn bản này ===
             suggested = suggest_min_freq(list(counter.values()))
             note = f"HanLP  |  ngưỡng đang dùng: ≥{min_freq}  |  💡 gợi ý cho văn bản này: ≥{suggested}"
+            if target_set:
+                note += f"  |  bỏ qua {len(excluded_names)} tên đã có trong bộ “{target_set}”"
 
             self.after(0, lambda: self._populate_results(results, note))
             try:
@@ -3636,6 +3669,32 @@ def plan_name_set_merge(existing, pairs, overwrite=False):
                       "status": st, "apply": st == "new" or (st == "diff" and overwrite)})
         counts[st] += 1
     return items, counts, n_valid - len(seen)
+
+
+def exclude_names_already_in_set(rows, existing):
+    """Split name rows into new candidates and names already present in a name set."""
+    existing_values = {str(name).strip(): value for name, value in (existing or {}).items()}
+    new_rows, existing_rows = [], []
+    for row in rows:
+        name = str(row[0] or "").strip()
+        if name in existing_values:
+            existing_rows.append((row, existing_values[name]))
+        else:
+            new_rows.append(row)
+    return new_rows, existing_rows
+
+
+def filter_name_counter_by_set(counter, existing_names):
+    """Remove HanLP results whose Chinese names already exist in the selected set."""
+    known_names = {str(name).strip() for name in existing_names}
+    filtered = {}
+    excluded = []
+    for name, frequency in counter.items():
+        if str(name).strip() in known_names:
+            excluded.append(name)
+        else:
+            filtered[name] = frequency
+    return filtered, excluded
 
 
 def name_capitalize_auto(text):

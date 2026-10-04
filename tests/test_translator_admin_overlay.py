@@ -3,10 +3,32 @@ import os
 import tempfile
 import unittest
 
-from slhtool import ZhViTranslator
+from slhtool import (
+    ZhViTranslator,
+    exclude_names_already_in_set,
+    filter_name_counter_by_set,
+)
 
 
 class TranslatorAdminOverlayTests(unittest.TestCase):
+    def test_hanlp_counter_excludes_names_in_selected_set(self):
+        filtered, excluded = filter_name_counter_by_set(
+            {"林动": 8, "牧尘": 4}, {"林动": "Lâm Động"}
+        )
+
+        self.assertEqual(filtered, {"牧尘": 4})
+        self.assertEqual(excluded, ["林动"])
+
+    def test_names_already_in_selected_set_are_excluded(self):
+        rows = [("林动", "3 lần", "Chính"), ("牧尘", "2 lần", "Phụ")]
+
+        new_rows, existing_rows = exclude_names_already_in_set(
+            rows, {"林动": "Lâm Động"}
+        )
+
+        self.assertEqual(new_rows, [("牧尘", "2 lần", "Phụ")])
+        self.assertEqual(existing_rows, [(("林动", "3 lần", "Chính"), "Lâm Động")])
+
     def test_remote_entries_merge_over_cached_dictionary_entries(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = {
