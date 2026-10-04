@@ -1,54 +1,33 @@
 #!/usr/bin/env python3
-
 # -*- coding: utf-8 -*-
-
 """
-
 ============================================================
-
-  VĂN BẢN TOOL - Tích hợp 3 chức năng
-
+  SLH TOOL - Tích hợp 3 chức năng
   1. Lọc tên nhân vật
-
   2. Tạo EPUB
-
   3. Dịch QT
-
 ============================================================
-
 Build EXE:
-
     pip install pyinstaller
-
     pyinstaller --onefile --windowed --icon=app.ico slhtool.py
-
 ============================================================
-
 """
-
 import os
-
 import re
-
 import csv
-
 import sys
-
 import shutil
-
 import tempfile
-
 import subprocess
-
+import queue
 import tkinter as tk
-
 from tkinter import filedialog, messagebox, ttk
-
 from collections import Counter
-
 from threading import Thread
 import threading
 import webbrowser
+from admin_client import AdminClient, AdminApiError
+from admin_ui import AdminLoginDialog, AdminPanel
 
 # ── Giao diện: bảng màu xanh lá + hồng pastel (sửa ở đây, toàn app đổi theo) ──
 THEME = {
@@ -82,7 +61,7 @@ DATA_BRANCH = "main"
 
 HANLP_PACK_URL = f"https://github.com/{GITHUB_REPO}/releases/download/hanlp-pack-v1/hanlp_pack.zip"
 UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-DATA_RAW_BASE = f"https://raw.githubusercontent.com/{DATA_REPO}/{DATA_BRANCH}/"
+DATA_RAW_BASE = f"https://raw.githubusercontent.com/{DATA_REPO}/{DATA_BRANCH}/slh-data/"
 
 
 def _bundled_dir():
@@ -99,7 +78,7 @@ def _bundled_dir():
 def _app_data_dir():
     """Thư mục GHI DỮ LIỆU của app: cấu hình, từ điển, danh sách loại trừ, gói HanLP.
 
-    Windows  : %APPDATA%\SLHTool   (vd. C:\\Users\\Ten\\AppData\\Roaming\\SLHTool)
+    Windows  : %APPDATA%\\SLHTool   (vd. C:\\Users\\Ten\\AppData\\Roaming\\SLHTool)
     Khác     : ~/.slhtool           (dùng khi chạy thử bằng Python trên Linux/Mac)
     Luôn ghi được dù EXE được cài vào Program Files.
     """
@@ -120,9 +99,7 @@ HANLP_RUNTIME_DIR = os.path.join(APP_DATA_DIR, "hanlp_runtime")
 def sync_admin_lists(log=None):
     """Tải bản mới của các file trong CUSTOM_LIST_DEFS từ DATA_REPO nếu có version mới.
 
-    Chỉ ghi đè phần "admin" (đồng bộ từ GitHub) — không đụng tới phần người dùng tự
-    thêm trong app (được lưu chung 1 file, xem `load_custom_list`/`save_custom_list`:
-    khi đồng bộ, hai tập được GỘP rồi ghi lại, nên chữ người dùng tự thêm không mất).
+    Thay thế cache server riêng; danh sách người dùng được lưu độc lập và không bị ghi đè.
     Trả về True nếu có cập nhật được áp dụng.
     """
     log = log or (lambda _m: None)
@@ -140,33 +117,54 @@ def sync_admin_lists(log=None):
         log(f"Không kiểm tra được cập nhật danh sách: {e}")
         return False
     remote_ver = manifest.get("version", 0)
-    if remote_ver <= local_ver:
-        os.replace(tmp_path, ver_path)          # vẫn lưu lại để lần sau khỏi tải lại bản y hệt
+    cache_complete = all(os.path.isfile(_admin_list_path(key)) for key in CUSTOM_LIST_DEFS)
+    if remote_ver <= local_ver and cache_complete:
+        os.remove(tmp_path)
         return False
 
-    changed = False
+    os.makedirs(os.path.dirname(_admin_list_path("blacklist")), exist_ok=True)
+    downloaded = {}
+    temp_paths = {}
     for key, info in CUSTOM_LIST_DEFS.items():
         fname = manifest.get("files", {}).get(key)
         if not fname:
+            downloaded[key] = set()
             continue
         try:
-            tmp = _custom_list_path(key) + ".remote"
+            tmp = _admin_list_path(key) + ".download"
             _trans_download(DATA_RAW_BASE + fname, tmp, timeout=30)
-            remote_words = _custom_list_expand(key, open(tmp, encoding="utf-8").read().split("\n"))
-            os.remove(tmp)
+            with open(tmp, encoding="utf-8") as f:
+                downloaded[key] = _custom_list_expand(key, f.read().splitlines())
+            temp_paths[key] = tmp
         except Exception as e:
             log(f"Không tải được {fname}: {e}")
-            continue
-        # Gộp: giữ nguyên chữ người dùng đã tự thêm, cộng thêm danh sách admin mới nhất
-        before = CUSTOM_LIST_WORDS[key]
-        merged = before | remote_words
-        if merged != before:
-            save_custom_list(key, sorted(merged))
-            changed = True
-            log(f"Đã cập nhật {info['label']}: +{len(merged) - len(before)} mục")
+            for path in temp_paths.values():
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
+
+    downloaded["blacklist"].update(_custom_list_expand("blacklist", ADMIN_REMOTE_DATA.get("blacklist", [])))
+    changed = any(downloaded[key] != ADMIN_LIST_WORDS[key] for key in CUSTOM_LIST_DEFS)
+    for key in CUSTOM_LIST_DEFS:
+        path = _admin_list_path(key)
+        if key in temp_paths:
+            os.replace(temp_paths[key], path)
+        else:
+            tmp = path + ".download"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("")
+            os.replace(tmp, path)
+        ADMIN_LIST_WORDS[key] = downloaded[key]
+    _refresh_custom_list_targets()
     os.replace(tmp_path, ver_path)
     if changed:
-        log(f"Đã đồng bộ danh sách loại trừ lên phiên bản dữ liệu #{remote_ver}.")
+        log(f"Đã đồng bộ danh sách lên phiên bản dữ liệu #{remote_ver}.")
     return changed
 
 
@@ -265,53 +263,29 @@ def packaged_hanlp_python():
     return None
 
 # ═══════════════════════════════════════════════════════════
-
 #  PHẦN 1 — DỮ LIỆU DÙNG CHUNG
-
 # ═══════════════════════════════════════════════════════════
-
 # ── Lọc ký tự (Chinese Line Checker) ──────────────────────
-
 CATEGORY_DEFS = [
-
     ("han",          r'\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF',
-
      "Chữ Hán (CJK + mở rộng)", True),
-
     ("cjk_punct",    r'\u3000-\u303F\uFF00-\uFFEF',
-
      "Dấu câu Trung / full-width （。！？…）", True),
-
     ("curly_quotes", r'\u2010-\u2027',
-
      "Ngoặc kép/nháy cong \u201c\u201d \u2018\u2019 và dấu … –", True),
-
     ("latin_letters",r'A-Za-z',
-
      "Chữ cái Latin (a-z, A-Z)", False),
-
     ("digits",       r'0-9',
-
      "Chữ số (0-9)", False),
-
     ("latin_punct",  r'!-/:-@\[-`{-~',
-
      "Dấu câu Latin (, ! ? ; : \" ( ) - * & % … trừ dấu chấm '.')", False),
-
     ("vietnamese",   r'\u00C0-\u024F\u1E00-\u1EFF',
-
      "Chữ có dấu tiếng Việt", False),
-
 ]
-
 CATEGORY_PATTERNS = {
-
     key: re.compile(f'[{cc}]')
-
     for key, cc, label, default in CATEGORY_DEFS
-
 }
-
 ENDING_VALID_CHARS = set('\u3002\uff01\uff1f\u2026\u300d\u300f"\'\uff09\u2019\u201d')
 
 # ── Lọc tên nhân vật ──────────────────────────────────────
@@ -525,6 +499,18 @@ CUSTOM_LIST_DEFS = {
 }
 
 CUSTOM_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
+CUSTOM_LIST_BASE_WORDS = {key: set(info["target"]) for key, info in CUSTOM_LIST_DEFS.items()}
+ADMIN_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
+ADMIN_REMOTE_DATA = {}
+
+def _admin_list_path(key):
+    return os.path.join(APP_DATA_DIR, "admin_lists", f"{key}.txt")
+
+def _refresh_custom_list_targets():
+    for key, info in CUSTOM_LIST_DEFS.items():
+        target = info["target"]
+        target.clear()
+        target.update(CUSTOM_LIST_BASE_WORDS[key] | CUSTOM_LIST_WORDS[key] | ADMIN_LIST_WORDS[key])
 
 def _custom_list_path(key):
     return os.path.join(_custom_list_app_dir(), CUSTOM_LIST_DEFS[key]["file"])
@@ -554,7 +540,7 @@ def load_custom_list(key):
             pass
     words = _custom_list_expand(key, raw)
     CUSTOM_LIST_WORDS[key] = words
-    CUSTOM_LIST_DEFS[key]["target"].update(words)
+    _refresh_custom_list_targets()
     return words
 
 def save_custom_list(key, raw_lines):
@@ -562,14 +548,23 @@ def save_custom_list(key, raw_lines):
     path = _custom_list_path(key)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(sorted(words)))
-    target = CUSTOM_LIST_DEFS[key]["target"]
-    target.difference_update(CUSTOM_LIST_WORDS[key])  # bỏ bản cũ
-    target.update(words)                               # thêm bản mới
     CUSTOM_LIST_WORDS[key] = words
+    _refresh_custom_list_targets()
+
+def load_admin_lists():
+    for key in CUSTOM_LIST_DEFS:
+        path = _admin_list_path(key)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                ADMIN_LIST_WORDS[key] = _custom_list_expand(key, f.read().splitlines())
+        except OSError:
+            ADMIN_LIST_WORDS[key] = set()
+    _refresh_custom_list_targets()
 
 def load_all_custom_lists():
     for key in CUSTOM_LIST_DEFS:
         load_custom_list(key)
+    load_admin_lists()
 
 load_all_custom_lists()
 
@@ -580,6 +575,77 @@ def clean_name_candidate(word):
     while word and word[-1] in NAME_TRIM_TRAIL:
         word = word[:-1]
     return word
+
+
+# ═══════════════════════════════════════════════════════════
+#  === MỚI: GỘP BIẾN THỂ TÊN BỊ DÍNH HẬU TỐ + ĐỀ XUẤT NGƯỠNG TẦN SUẤT ===
+# ═══════════════════════════════════════════════════════════
+
+def merge_name_variants(counter, min_ratio=0.25, min_ignore_freq=6):
+    """
+    Gộp các tên bị dính thêm 1-2 ký tự ở cuối (do HanLP nhận nhầm ranh giới từ,
+    ví dụ 萧景刚/萧景才/萧景先/萧景正 đều là "萧景" + hư từ) vào tên gốc có
+    tần suất cao hơn hẳn.
+
+    Quy tắc gộp 'other' (dài hơn) vào 'base' (gốc, other = base + hậu tố) khi:
+    1) Hậu tố đó dính vào từ ≥2 tên gốc khác nhau trong toàn bộ kết quả
+       → gần chắc chắn là hư từ/phó từ (không phải 1 phần của tên riêng), LUÔN gộp.
+       (Ví dụ: cả 萧景 lẫn 陆昭 đều bị dính "先"/"刚" → 先/刚 là hư từ.)
+    2) Hoặc tần suất của 'other' quá thấp so với 'base' (other <= 25% base,
+       hoặc dưới min_ignore_freq lần) → coi là nhiễu, gộp luôn.
+    """
+    names = sorted((n for n in counter if len(n) >= 2), key=lambda n: -counter[n])
+    result = dict(counter)
+    removed = set()
+
+    # Bước 1: tìm những "hậu tố" dính vào nhiều tên gốc khác nhau
+    suffix_hits = {}
+    for base in names:
+        for other in names:
+            if other == base:
+                continue
+            if len(other) - len(base) in (1, 2) and other.startswith(base):
+                extra = other[len(base):]
+                suffix_hits.setdefault(extra, set()).add(base)
+    junk_suffixes = {s for s, bases in suffix_hits.items() if len(bases) >= 2}
+
+    # Bước 2: gộp theo thứ tự tần suất giảm dần (tên mạnh gộp trước)
+    for base in names:
+        if base in removed or base not in result:
+            continue
+        base_freq = result[base]
+        for other in names:
+            if other == base or other in removed or other not in result:
+                continue
+            if len(other) - len(base) not in (1, 2) or not other.startswith(base):
+                continue
+            extra = other[len(base):]
+            other_freq = result[other]
+            if extra in junk_suffixes or other_freq <= max(min_ignore_freq, base_freq * min_ratio):
+                result[base] = result.get(base, 0) + other_freq
+                del result[other]
+                removed.add(other)
+    return result
+
+
+def suggest_min_freq(freqs):
+    """Đề xuất ngưỡng tần suất tối thiểu dựa theo điểm gãy tự nhiên (kiểu elbow)
+    trong phân bố tần suất các tên đã lọc được từ chính văn bản đang xử lý."""
+    freqs = sorted((f for f in freqs if f > 0), reverse=True)
+    n = len(freqs)
+    if n == 0:
+        return 5
+    if n <= 8:
+        return max(2, freqs[-1])
+    best_i, best_gap = 1, 0
+    for i in range(1, min(n, 80)):
+        prev, cur = freqs[i - 1], freqs[i]
+        if cur <= 0:
+            continue
+        gap = prev / cur
+        if gap > best_gap:
+            best_gap, best_i = gap, i
+    return max(3, min(int(freqs[best_i]), 25))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -654,7 +720,7 @@ def split_sentences(text):
 def ok(w):
     if not (2 <= len(w) <= 4):
         return False
-    if re.search(r'[a-zA-Z0-9。，！？、…「」『』【】\s]', w):
+    if re.search(r'[a-zA-Z0-9。，！？、「」『』【】\s]', w):
         return False
     return True
 
@@ -791,147 +857,83 @@ def find_python_with_hanlp():
     return None
 
 # ═══════════════════════════════════════════════════════════
-
 #  PHẦN 3 — DIALOG TÌM / THAY THẾ
-
 # ═══════════════════════════════════════════════════════════
-
 class FindReplaceDialog(tk.Toplevel):
-
     def __init__(self, master, text_widget):
-
         super().__init__(master)
-
         self.text_widget = text_widget
-
         self.title("Tìm / Thay thế  (Ctrl+F)")
-
         self.geometry("440x145")
-
         self.resizable(False, False)
-
         frm = ttk.Frame(self, padding=10)
-
         frm.pack(fill=tk.BOTH, expand=True)
-
         ttk.Label(frm, text="Tìm:").grid(row=0, column=0, sticky=tk.W, pady=3)
-
         self.find_var = tk.StringVar()
-
         fe = ttk.Entry(frm, textvariable=self.find_var, width=36)
-
         fe.grid(row=0, column=1, columnspan=3, sticky=tk.W, pady=3)
-
         fe.focus_set()
-
         ttk.Label(frm, text="Thay bằng:").grid(row=1, column=0, sticky=tk.W, pady=3)
-
         self.replace_var = tk.StringVar()
-
         ttk.Entry(frm, textvariable=self.replace_var, width=36).grid(
-
             row=1, column=1, columnspan=3, sticky=tk.W, pady=3)
-
         ttk.Button(frm, text="Tìm tiếp",    command=self.find_next).grid(row=2, column=0, pady=8)
-
         ttk.Button(frm, text="Thay",         command=self.replace_one).grid(row=2, column=1, pady=8)
-
         ttk.Button(frm, text="Thay tất cả", command=self.replace_all).grid(row=2, column=2, pady=8)
-
         ttk.Button(frm, text="Đóng",         command=self.destroy).grid(row=2, column=3, pady=8)
-
         self.text_widget.tag_configure("find_match", background="#ffe066")
-
         self.bind("<Return>", lambda e: self.find_next())
-
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self):
-
         self.text_widget.tag_remove("find_match", "1.0", tk.END)
-
         self.destroy()
 
     def find_next(self):
-
         q = self.find_var.get()
-
         if not q: return
-
         self.text_widget.tag_remove("find_match", "1.0", tk.END)
-
         start = self.text_widget.index(tk.INSERT)
-
         pos = self.text_widget.search(q, start, stopindex=tk.END)
-
         if not pos:
-
             pos = self.text_widget.search(q, "1.0", stopindex=tk.END)
-
             if not pos:
-
                 messagebox.showinfo("Không tìm thấy", f"Không tìm thấy: {q}", parent=self)
-
                 return
-
         end = f"{pos}+{len(q)}c"
-
         self.text_widget.tag_add("find_match", pos, end)
-
         self.text_widget.mark_set(tk.INSERT, end)
-
         self.text_widget.see(pos)
 
     def replace_one(self):
-
         sel = self.text_widget.tag_ranges("find_match")
-
         if sel:
-
             self.text_widget.delete(sel[0], sel[1])
-
             self.text_widget.insert(sel[0], self.replace_var.get())
-
         self.find_next()
 
     def replace_all(self):
-
         q = self.find_var.get()
-
         r = self.replace_var.get()
-
         if not q: return
-
         content = self.text_widget.get("1.0", "end-1c")
-
         count = content.count(q)
-
         if count == 0:
-
             messagebox.showinfo("Không tìm thấy", f"Không tìm thấy: {q}", parent=self)
-
             return
-
         self.text_widget.delete("1.0", tk.END)
-
         self.text_widget.insert("1.0", content.replace(q, r))
-
         messagebox.showinfo("Đã thay thế", f"Đã thay {count} chỗ.", parent=self)
 
 
 # ═══════════════════════════════════════════════════════════
-
 #  PHẦN 5 — TAB 2: LỌC TÊN NHÂN VẬT
-
 # ═══════════════════════════════════════════════════════════
-
 class TabNames(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.translate_tab = None      # được App gắn vào: tab Dịch Trung → Việt (engine + bộ tên)
         self._build()
-
-    
 
     def paste_text(self):
         """Dán nội dung từ clipboard vào input_text."""
@@ -946,75 +948,41 @@ class TabNames(ttk.Frame):
         self.status_var.set("Đã dán văn bản → nhấn 'Lọc bằng HanLP'.")
 
     def open_file(self):
-
         """Mở file .txt chứa văn bản tiếng Trung."""
-
         path = filedialog.askopenfilename(
-
             filetypes=[("Text files","*.txt"),("Tất cả","*.*")]
-
         )
-
         if not path: 
-
             return
-
         for enc in ["utf-8","utf-8-sig","gb18030","gbk"]:
-
             try:
-
                 with open(path, "r", encoding=enc, errors="strict") as f:
-
                     content = f.read()
-
                 break
-
             except Exception:
-
                 content = None
-
         if not content:
-
             with open(path, "r", encoding="utf-8", errors="replace") as f:
-
                 content = f.read()
-
         self.input_text.delete("1.0", tk.END)
-
         self.input_text.insert("1.0", content)
-
         self.status_var.set(f"Đã mở: {os.path.basename(path)} → nhấn 'Lọc bằng HanLP'.")
 
-
     def _build(self):
-
         # Toolbar
-
         tb = ttk.Frame(self)
-
         tb.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
-
         ttk.Button(tb, text="📋 Dán văn bản", command=self.paste_text).pack(side=tk.LEFT)
-
         ttk.Button(tb, text="📂 Mở file .txt", command=self.open_file).pack(side=tk.LEFT, padx=(4,0))
 
-        
-
         # ── Ngưỡng tần suất: giờ người dùng tự chọn, không cố định 2 nữa ──
-
         freq_fr = ttk.Frame(tb)
-
         freq_fr.pack(side=tk.LEFT, padx=(12, 0))
-
         ttk.Label(freq_fr, text="Tần suất tối thiểu:").pack(side=tk.LEFT)
-
         self.min_freq_var = tk.IntVar(value=5)
-
         ttk.Spinbox(freq_fr, from_=1, to=999, width=5,
-
                     textvariable=self.min_freq_var).pack(side=tk.LEFT, padx=(4, 0))
-
-        
+        ttk.Button(freq_fr, text="🔁 Áp dụng lại", command=self.reapply_threshold).pack(side=tk.LEFT, padx=(4, 0))
 
         self.hanlp_btn = ttk.Button(tb, text="🎯 Lọc bằng HanLP", style="Accent.TButton", command=self.run_hanlp)
         self.hanlp_btn.pack(side=tk.LEFT, padx=(12,0))
@@ -1023,9 +991,7 @@ class TabNames(ttk.Frame):
         self.translate_btn.pack(side=tk.LEFT, padx=(4,0))
 
         ttk.Button(tb, text="💾 Sao chép kết quả", command=self.copy_result).pack(side=tk.LEFT, padx=(4,0))
-
         ttk.Button(tb, text="💾 Lưu kết quả", command=self.save_result).pack(side=tk.LEFT, padx=(4,0))
-
         ttk.Button(tb, text="🗂 Quản lý danh sách", command=self.open_blacklist_manager).pack(side=tk.LEFT, padx=(4,0))
 
         self.status_var = tk.StringVar(value="Dán văn bản tiếng Trung → 'Lọc bằng HanLP' → 'Dịch name' → thêm vào bộ tên")
@@ -1033,100 +999,68 @@ class TabNames(ttk.Frame):
 
         self._hanlp_running = False
 
-        
-
         # PanedWindow ngang
-
         pw = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-
         pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0,6))
-
         # Input
-
         left = ttk.LabelFrame(pw, text="Văn bản đầu vào (tiếng Trung)")
-
         pw.add(left, weight=3)
-
         self.input_text = tk.Text(left, wrap=tk.WORD, font=FONT_TEXT, undo=True)
-
         self.input_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
         isb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.input_text.yview)
-
         self.input_text.configure(yscrollcommand=isb.set)
-
         # Output: bảng tên
-
         right = ttk.Frame(pw)
-
         pw.add(right, weight=2)
-
         rf = ttk.LabelFrame(right, text="Tên tìm được (sắp xếp theo tần suất)")
-
         rf.pack(fill=tk.BOTH, expand=True)
-
         cols = ("name","freq","group")
-
         self.name_tree = ttk.Treeview(rf, columns=cols, show="headings", height=30)
-
         self.name_tree.heading("name",  text="Tên")
-
         self.name_tree.heading("freq",  text="Số lần")
-
         self.name_tree.heading("group", text="Phân loại")
-
         self.name_tree.column("name",  width=120, anchor=tk.CENTER)
-
         self.name_tree.column("freq",  width=80,  anchor=tk.CENTER)
-
         self.name_tree.column("group", width=160)
-
         self.name_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-
         # Màu nhóm
-
         self.name_tree.tag_configure("main",  background="#d4edda")  # xanh lá nhạt
-
         self.name_tree.tag_configure("side",  background="#fff3cd")  # vàng nhạt
-
         self.name_tree.tag_configure("minor", background="#f8f9fa")  # trắng xám
-
         nsb = ttk.Scrollbar(rf, orient=tk.VERTICAL, command=self.name_tree.yview)
-
         nsb.pack(side=tk.LEFT, fill=tk.Y)
-
         self.name_tree.configure(yscrollcommand=nsb.set)
-
         self.name_tree.bind("<Button-3>", self._show_name_context_menu)
 
     def _populate_results(self, results, source_note=""):
-
         for item in self.name_tree.get_children():
-
             self.name_tree.delete(item)
-
         min_freq = self.min_freq_var.get()
-
         for name, freq in results:
-
             if freq >= max(20, min_freq):
-
                 threshold = max(20, min_freq)
-
                 group, tag = f"Nhân vật chính (≥{threshold})", "main"
-
             elif freq >= min_freq:
-
                 group, tag = f"Nhân vật phụ ({min_freq}-19)", "side"
-
             else:
-
                 group, tag = f"Xuất hiện ít (<{min_freq})", "minor"
-
             self.name_tree.insert("", tk.END, values=(name, f"{freq} lần", group), tags=(tag,))
 
         self.status_var.set(f"Tìm được {len(results)} tên  |  {source_note}")
         self.translate_btn.config(state="normal" if results else "disabled")
+
+    def reapply_threshold(self):
+        """Áp dụng lại ngưỡng tần suất mới lên kết quả HanLP đã gộp biến thể,
+        KHÔNG cần chạy lại HanLP (nhanh, vì model không phải nạp lại)."""
+        if not hasattr(self, "_last_counter"):
+            messagebox.showinfo("Chưa có dữ liệu", "Hãy chạy 'Lọc bằng HanLP' ít nhất 1 lần trước.", parent=self)
+            return
+        min_freq = self.min_freq_var.get()
+        results = sorted(
+            [(n, fr) for n, fr in self._last_counter.items() if fr >= min_freq],
+            key=lambda x: (-x[1], x[0]),
+        )
+        self._populate_results(results, f"Áp dụng lại ngưỡng ≥{min_freq} (không chạy lại HanLP)")
 
     def open_name_translate(self):
         """Nút 'Dịch name': mở cửa sổ tự dịch các tên đã lọc rồi thêm vào bộ tên (Quản lý Name).
@@ -1212,8 +1146,8 @@ class TabNames(ttk.Frame):
 
         ttk.Label(
             win,
-            text=("Quản lý 4 danh sách dùng để lọc tên nhân vật.\n"
-                  "Sửa xong bấm 'Lưu' ở từng tab để áp dụng ngay — không cần build lại EXE."),
+            text=("Đây là danh sách riêng trên máy này. Danh sách máy chủ được lưu riêng và thay thế khi đồng bộ.\n"
+                "Sửa xong bấm 'Lưu' ở từng tab để áp dụng ngay — không cần build lại EXE."),
             foreground="#555", wraplength=540, justify="left",
         ).pack(padx=10, pady=(10, 4), anchor="w")
 
@@ -1395,11 +1329,21 @@ class TabNames(ttk.Frame):
                 w2 = clean_name_candidate(w)
                 if is_valid_name(w2):
                     counter[w2] += fr
+
+            # === MỚI: gộp biến thể tên bị dính hư từ (萧景刚/萧景才/萧景先... → 萧景) ===
+            counter = merge_name_variants(counter)
+            self._last_counter = counter    # lưu lại để "Áp dụng lại" ngưỡng không cần chạy lại HanLP
+
             results = sorted(
                 [(n, fr) for n, fr in counter.items() if fr >= min_freq],
                 key=lambda x: (-x[1], x[0]),
             )
-            self.after(0, lambda: self._populate_results(results, f"HanLP  |  ngưỡng: ≥{min_freq} lần"))
+
+            # === MỚI: đề xuất ngưỡng tần suất tối thiểu dựa theo chính văn bản này ===
+            suggested = suggest_min_freq(list(counter.values()))
+            note = f"HanLP  |  ngưỡng đang dùng: ≥{min_freq}  |  💡 gợi ý cho văn bản này: ≥{suggested}"
+
+            self.after(0, lambda: self._populate_results(results, note))
             try:
                 shutil.rmtree(tmpdir, ignore_errors=True)
             except Exception:
@@ -1439,499 +1383,272 @@ class TabNames(ttk.Frame):
         messagebox.showinfo("Đã lưu", f"Đã lưu tại:\n{path}")
 
 # ═══════════════════════════════════════════════════════════
-
 #  PHẦN 7 — TAB 4: TẠO & GỘP EPUB
-
 # ═══════════════════════════════════════════════════════════
-
 import zipfile
-
 import uuid
-
 import xml.etree.ElementTree as ET
-
 from datetime import date
-
 from threading import Thread
 
 def _esc_xml(s):
-
     return (str(s)
-
         .replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
         .replace('"',"&quot;").replace("'","&apos;"))
 
 def _uid():
-
     return uuid.uuid4().hex
 
 def _decode_entities(s):
-
     s = str(s)
-
     s = re.sub(r'&amp;',  '&', s)
-
     s = re.sub(r'&lt;',   '<', s)
-
     s = re.sub(r'&gt;',   '>', s)
-
     s = re.sub(r'&quot;', '"', s)
-
     s = re.sub(r'&apos;', "'", s)
-
     s = re.sub(r'&#x([0-9a-fA-F]+);', lambda m: chr(int(m.group(1),16)), s)
-
     s = re.sub(r'&#(\d+);',           lambda m: chr(int(m.group(1))),    s)
-
     return s
 
 # ── Đọc nội dung .docx bằng mammoth ──────────────────────
-
 def _read_docx_html(docx_path):
-
     """Dùng mammoth để chuyển .docx → HTML, giữ đúng heading/bold/italic."""
-
     import mammoth
-
     with open(docx_path, 'rb') as f:
-
         result = mammoth.convert_to_html(f)
-
     return result.value
 
 def _split_chapters(html):
-
     matches = list(re.finditer(r'<h1[^>]*>([\s\S]*?)</h1>', html, re.IGNORECASE))
-
     if not matches:
-
         return [{'title': 'Nội dung', 'data': html}]
-
     chapters = []
-
     for i, m in enumerate(matches):
-
         title = _decode_entities(re.sub(r'<[^>]+>','', m.group(1)).strip())
-
         start = m.start()
-
         end   = matches[i+1].start() if i+1 < len(matches) else len(html)
-
         chapters.append({'title': title, 'data': html[start:end]})
-
     return chapters
 
 def _image_bytes_to_webp(data, quality=80):
-
     """Nén ảnh (bytes) sang WebP. Trả về bytes WebP, hoặc None nếu không chuyển được."""
-
     try:
-
         from PIL import Image
-
         import io
-
         img = Image.open(io.BytesIO(data))
-
         if img.mode not in ("RGB", "RGBA"):
-
             img = img.convert("RGB")
-
         buf = io.BytesIO()
-
         img.save(buf, "WEBP", quality=quality, method=6)
-
         return buf.getvalue()
-
     except Exception:
-
         return None
 
 def _fmt_kb(n_bytes):
-
     if n_bytes >= 1024 * 1024:
-
         return f"{n_bytes / 1024 / 1024:.2f}MB"
-
     return f"{n_bytes / 1024:.1f}KB"
 
 # ── Build EPUB buffer ──────────────────────────────────────
-
 def _build_epub(title, author, description, cover_path, chapters, out_path, log=None):
-
     book_id = _uid()
-
     now     = date.today().isoformat()
-
     ext_map = {'.jpg':'image/jpeg','.jpeg':'image/jpeg',
-
                '.png':'image/png','.webp':'image/webp','.gif':'image/gif'}
-
     cover_ext  = None
-
     cover_mime = None
-
     cover_data = None
-
     if cover_path and os.path.exists(cover_path):
-
         cover_ext  = os.path.splitext(cover_path)[1].lower()
-
         cover_mime = ext_map.get(cover_ext, 'image/jpeg')
-
         with open(cover_path,'rb') as f:
-
             cover_data = f.read()
-
         # Tự nén ảnh bìa sang WebP để EPUB nhẹ hơn
-
         if cover_ext != '.webp':
-
             webp_data = _image_bytes_to_webp(cover_data)
-
             if webp_data:
-
                 if log:
-
                     log(f"🖼 Ảnh bìa: {_fmt_kb(len(cover_data))} ({cover_ext}) → WebP {_fmt_kb(len(webp_data))}")
-
                 cover_data = webp_data
-
                 cover_ext  = '.webp'
-
                 cover_mime = 'image/webp'
-
             elif log:
-
                 log("⚠ Không nén được ảnh bìa sang WebP (cần: pip install pillow) — giữ định dạng gốc.")
 
     with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as z:
-
         # mimetype — phải STORE, phải đầu tiên
-
         z.writestr(zipfile.ZipInfo('mimetype'), 'application/epub+zip',
-
                    compress_type=zipfile.ZIP_STORED)
-
         z.writestr('META-INF/container.xml',
-
             '<?xml version="1.0" encoding="UTF-8"?>\n'
-
             '<container version="1.0" xmlns="urn:oasis:schemas:container">\n'
-
             '  <rootfiles>\n'
-
             '    <rootfile full-path="OEBPS/content.opf"'
-
             ' media-type="application/oebps-package+xml"/>\n'
-
             '  </rootfiles>\n'
-
             '</container>')
 
         # Chapters
-
         ch_files = []
-
         for i, ch in enumerate(chapters):
-
             fname = f'chapter{i+1:03d}.xhtml'
-
             xhtml = (
-
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
-
                 '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"'
-
                 ' "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
-
                 '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="vi">\n'
-
                 f'<head><meta charset="UTF-8"/><title>{_esc_xml(ch["title"])}</title>\n'
-
                 '<style>body{font-family:serif;font-size:1em;line-height:1.6;margin:1em 1.5em;}'
-
                 'p{margin:0.5em 0;}h1,h2{font-weight:bold;}</style>\n'
-
                 f'</head>\n<body>{ch["data"]}</body>\n</html>'
-
             )
-
             z.writestr(f'OEBPS/{fname}', xhtml)
-
             ch_files.append({'id': f'ch{i+1}', 'href': fname, 'title': ch['title']})
 
         z.writestr('OEBPS/style.css', 'body{font-family:serif;line-height:1.6;}')
 
         # Cover
-
         cover_manifest = ''
-
         cover_spine    = ''
-
         cover_meta     = ''
-
         if cover_data:
-
             z.writestr(f'OEBPS/images/cover{cover_ext}', cover_data)
-
             z.writestr('OEBPS/cover.xhtml',
-
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
-
                 '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"'
-
                 ' "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
-
                 '<html xmlns="http://www.w3.org/1999/xhtml">\n'
-
                 '<head><title>Cover</title>'
-
                 '<style>body{margin:0;padding:0;text-align:center;}'
-
                 'img{max-width:100%;max-height:100%;}</style></head>\n'
-
                 f'<body><img src="images/cover{cover_ext}" alt="Cover"/></body>\n</html>')
-
             cover_manifest = (
-
                 f'    <item id="cover-image" href="images/cover{cover_ext}"'
-
                 f' media-type="{cover_mime}" properties="cover-image"/>\n'
-
                 '    <item id="cover-page" href="cover.xhtml"'
-
                 ' media-type="application/xhtml+xml"/>')
-
             cover_spine = '    <itemref idref="cover-page" linear="no"/>'
-
             cover_meta  = '    <meta name="cover" content="cover-image"/>'
 
         manifest_items = '\n'.join(
-
             f'    <item id="{c["id"]}" href="{c["href"]}"'
-
             f' media-type="application/xhtml+xml"/>' for c in ch_files)
-
         spine_items = '\n'.join(
-
             f'    <itemref idref="{c["id"]}"/>' for c in ch_files)
-
         desc_meta = (f'    <dc:description>{_esc_xml(description)}</dc:description>'
-
                      if description and description.strip() else '')
 
         z.writestr('OEBPS/content.opf',
-
             '<?xml version="1.0" encoding="UTF-8"?>\n'
-
             '<package xmlns="http://www.idpf.org/2007/opf"'
-
             ' unique-identifier="bookid" version="2.0">\n'
-
             '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"'
-
             ' xmlns:opf="http://www.idpf.org/2007/opf">\n'
-
             f'    <dc:identifier id="bookid">urn:uuid:{book_id}</dc:identifier>\n'
-
             f'    <dc:title>{_esc_xml(title)}</dc:title>\n'
-
             f'    <dc:creator>{_esc_xml(author)}</dc:creator>\n'
-
             '    <dc:language>vi</dc:language>\n'
-
             f'    <dc:date>{now}</dc:date>\n'
-
             + (desc_meta + '\n' if desc_meta else '')
-
             + (cover_meta + '\n' if cover_meta else '') +
-
             '  </metadata>\n'
-
             '  <manifest>\n'
-
             '    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>\n'
-
             '    <item id="css" href="style.css" media-type="text/css"/>\n'
-
             + (cover_manifest + '\n' if cover_manifest else '')
-
             + manifest_items + '\n'
-
             '  </manifest>\n'
-
             '  <spine toc="ncx">\n'
-
             + (cover_spine + '\n' if cover_spine else '')
-
             + spine_items + '\n'
-
             '  </spine>\n'
-
             '</package>')
 
         nav_points = '\n'.join(
-
             f'  <navPoint id="nav{i+1}" playOrder="{i+1}">\n'
-
             f'    <navLabel><text>{_esc_xml(c["title"])}</text></navLabel>\n'
-
             f'    <content src="{c["href"]}"/>\n'
-
             f'  </navPoint>' for i, c in enumerate(ch_files))
-
         z.writestr('OEBPS/toc.ncx',
-
             '<?xml version="1.0" encoding="UTF-8"?>\n'
-
             '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"'
-
             ' "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">\n'
-
             '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">\n'
-
             f'  <head><meta name="dtb:uid" content="urn:uuid:{book_id}"/></head>\n'
-
             f'  <docTitle><text>{_esc_xml(title)}</text></docTitle>\n'
-
             '  <navMap>\n' + nav_points + '\n  </navMap>\n</ncx>')
 
 # ── Đọc EPUB để lấy chapters + metadata ───────────────────
-
 def _read_epub(epub_path):
-
     with zipfile.ZipFile(epub_path, 'r') as z:
-
         names = z.namelist()
-
         container_xml = z.read('META-INF/container.xml').decode('utf-8')
-
         opf_path = re.search(r'full-path="([^"]+\.opf)"', container_xml)
-
         if not opf_path:
-
             raise ValueError('Không tìm thấy OPF path')
-
         opf_path = opf_path.group(1)
-
         opf_dir  = '/'.join(opf_path.split('/')[:-1])
-
         opf_pfx  = (opf_dir + '/') if opf_dir else ''
-
         opf_xml  = z.read(opf_path).decode('utf-8')
 
         # Metadata
-
         book_title  = _decode_entities(re.search(r'<dc:title[^>]*>(.*?)</dc:title>', opf_xml, re.S) and
-
                       re.search(r'<dc:title[^>]*>(.*?)</dc:title>', opf_xml, re.S).group(1) or
-
                       os.path.basename(epub_path))
-
         book_author = _decode_entities((re.search(r'<dc:creator[^>]*>(.*?)</dc:creator>', opf_xml, re.S) or
-
                       type('', (), {'group': lambda s,i: 'Unknown'})()).group(1))
-
         book_desc_m = re.search(r'<dc:description[^>]*>(.*?)</dc:description>', opf_xml, re.S)
-
         book_desc   = _decode_entities(book_desc_m.group(1)) if book_desc_m else ''
 
         # Manifest
-
         manifest = {}
-
         for m in re.finditer(r'<item\s(.*?)/>', opf_xml, re.S):
-
             attrs = m.group(1)
-
             item_id   = (re.search(r'\bid="([^"]+)"', attrs) or type('',(),{'group':lambda s,i:''})()).group(1)
-
             item_href  = (re.search(r'\bhref="([^"]+)"', attrs) or type('',(),{'group':lambda s,i:''})()).group(1)
-
             item_mime  = (re.search(r'media-type="([^"]+)"', attrs) or type('',(),{'group':lambda s,i:''})()).group(1)
-
             item_props = (re.search(r'properties="([^"]+)"', attrs) or type('',(),{'group':lambda s,i:''})()).group(1)
-
             if item_id:
-
                 manifest[item_id] = {'href': item_href, 'mime': item_mime, 'props': item_props}
 
         # Cover
-
         cover_data = None
-
         cover_ext  = None
-
         for item_id, info in manifest.items():
-
             if info['mime'].startswith('image/') and (
-
                 'cover-image' in info['props'] or item_id == 'cover-image' or
-
                 'cover' in info['href'].lower()
-
             ):
-
                 img_path = opf_pfx + info['href']
-
                 if img_path in names:
-
                     cover_data = z.read(img_path)
-
                     cover_ext  = os.path.splitext(info['href'])[1].lower() or '.jpg'
-
                     break
 
         # Spine → chapters
-
         spine_idrefs = re.findall(r'<itemref\s[^>]*idref="([^"]+)"', opf_xml)
-
         chapters = []
-
         for idref in spine_idrefs:
-
             info = manifest.get(idref)
-
             if not info: continue
-
             if 'cover' in info['props'] or idref == 'cover-page': continue
-
             fp = opf_pfx + info['href']
-
             if fp not in names: continue
-
             html = z.read(fp).decode('utf-8', errors='replace')
-
             h1   = re.search(r'<h[12][^>]*>([\s\S]*?)</h[12]>', html, re.I)
-
             ch_title = _decode_entities(re.sub(r'<[^>]+>','', h1.group(1)).strip()) if h1 else ''
-
             if not ch_title:
-
                 t = re.search(r'<title[^>]*>(.*?)</title>', html, re.I)
-
                 ch_title = _decode_entities(t.group(1).strip()) if t else f'Chương {len(chapters)+1}'
-
             body = re.search(r'<body[^>]*>([\s\S]*?)</body>', html, re.I)
-
             chapters.append({'title': ch_title, 'data': body.group(1) if body else html})
-
         if not chapters:
-
             raise ValueError(f'Không đọc được chương từ {os.path.basename(epub_path)}')
-
     return {
-
         'title': book_title, 'author': book_author,
-
         'description': book_desc,
-
         'cover_data': cover_data, 'cover_ext': cover_ext,
-
         'chapters': chapters
-
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2562,376 +2279,218 @@ class ChapterPreviewDialog(tk.Toplevel):
 class TabEpub(ttk.Frame):
 
     def __init__(self, parent):
-
         super().__init__(parent)
-
+        self.translate_tab = None      # được App gắn vào: tab Dịch Trung → Việt (lấy văn bản kết quả dịch)
         self._build()
 
     def _build(self):
-
         # Sub-tabs: Tạo / Gộp
-
         self._mode = tk.StringVar(value='create')
-
         top = ttk.Frame(self)
-
         top.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(6,0))
-
         self._btn_create = ttk.Button(top, text="📄 Tạo EPUB (.docx / .txt)",
-
                                       command=lambda: self._switch('create'))
-
         self._btn_create.pack(side=tk.LEFT)
-
         self._btn_merge = ttk.Button(top, text="🔗 Gộp EPUB",
-
                                      command=lambda: self._switch('merge'))
-
         self._btn_merge.pack(side=tk.LEFT, padx=(6,0))
 
         # Container chứa 2 panel
-
         self._container = ttk.Frame(self)
-
         self._container.pack(fill=tk.BOTH, expand=True)
-
         self._panel_create = self._build_create(self._container)
-
         self._panel_merge  = self._build_merge(self._container)
-
         self._switch('create')
 
     def _switch(self, mode):
-
         self._mode.set(mode)
-
         if mode == 'create':
-
             self._panel_merge.pack_forget()
-
             self._panel_create.pack(fill=tk.BOTH, expand=True)
-
         else:
-
             self._panel_create.pack_forget()
-
             self._panel_merge.pack(fill=tk.BOTH, expand=True)
 
     # ── PANEL TẠO EPUB ────────────────────────────────────
-
     def _build_create(self, parent):
-
         frame = ttk.Frame(parent)
-
         pw = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
-
         pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         # Trái: form
-
         left = ttk.Frame(pw)
-
         pw.add(left, weight=2)
 
         # Thông tin sách
-
         info = ttk.LabelFrame(left, text="Thông tin sách")
-
         info.pack(fill=tk.BOTH, expand=True, pady=(0,6))
-
         ttk.Label(info, text="Tên truyện *").grid(row=0, column=0, sticky=tk.W, padx=8, pady=4)
-
         self._c_title = ttk.Entry(info, width=30)
-
         self._c_title.grid(row=0, column=1, sticky=tk.EW, padx=(0,8), pady=4)
-
         ttk.Label(info, text="Tác giả").grid(row=1, column=0, sticky=tk.W, padx=8, pady=4)
-
         self._c_author = ttk.Entry(info, width=30)
-
         self._c_author.grid(row=1, column=1, sticky=tk.EW, padx=(0,8), pady=4)
-
         ttk.Label(info, text="Văn án").grid(row=2, column=0, sticky=tk.W, padx=8, pady=(4,0))
-
         self._c_desc = tk.Text(info, height=10, font=("Segoe UI", 9), wrap=tk.WORD)
-
         self._c_desc.grid(row=3, column=0, columnspan=3, sticky=tk.NSEW, padx=8, pady=(0,6))
-
         _c_desc_sb = ttk.Scrollbar(info, orient=tk.VERTICAL, command=self._c_desc.yview)
-
         _c_desc_sb.grid(row=3, column=3, sticky=tk.NS, pady=(0,6))
-
         self._c_desc.configure(yscrollcommand=_c_desc_sb.set)
-
         info.columnconfigure(1, weight=1)
-
         info.rowconfigure(3, weight=1)   # văn án giãn theo cửa sổ
 
         # Ảnh bìa
-
         cover_f = ttk.LabelFrame(left, text="Ảnh bìa (tuỳ chọn)")
-
         cover_f.pack(fill=tk.X, pady=(0,6))
-
         self._c_cover_var = tk.StringVar(value="Chưa chọn ảnh bìa")
-
         ttk.Label(cover_f, textvariable=self._c_cover_var,
-
                   foreground="#888").pack(side=tk.LEFT, padx=8, pady=6, fill=tk.X, expand=True)
-
         ttk.Button(cover_f, text="🖼 Chọn ảnh",
-
                    command=self._c_pick_cover).pack(side=tk.RIGHT, padx=(0,8), pady=6)
-
         ttk.Button(cover_f, text="✕", width=3,
-
                    command=self._c_clear_cover).pack(side=tk.RIGHT, pady=6)
-
         self._c_cover_path = ''
 
-        # File .docx
-
-        docx_f = ttk.LabelFrame(left, text="File nguồn (.docx / .txt)")
-
+        # File / văn bản nguồn
+        docx_f = ttk.LabelFrame(left, text="Nguồn văn bản (.docx / .txt / dán từ 'Dịch QT')")
         docx_f.pack(fill=tk.X, pady=(0,6))
-
         btn_row = ttk.Frame(docx_f)
-
         btn_row.pack(fill=tk.X, padx=6, pady=(6,4))
-
         ttk.Button(btn_row, text="＋ Thêm file .docx / .txt",
-
                    command=self._c_add_docx).pack(side=tk.LEFT)
-
         ttk.Button(btn_row, text="📁 Chọn thư mục",
-
                    command=self._c_add_folder).pack(side=tk.LEFT, padx=(6,0))
-
+        ttk.Button(btn_row, text="📥 Lấy văn bản từ 'Dịch QT'", style="Accent.TButton",
+                   command=self._c_add_from_translate).pack(side=tk.LEFT, padx=(6,0))
         ttk.Button(btn_row, style="Pink.TButton", text="🗑 Xoá tất cả",
-
                    command=self._c_clear_docx).pack(side=tk.RIGHT)
-
         ttk.Button(btn_row, style="Pink.TButton", text="✕ Xoá mục chọn",
-
                    command=self._c_remove_selected).pack(side=tk.RIGHT, padx=(0,6))
-
         self._c_docx_lb = tk.Listbox(docx_f, height=4, selectmode=tk.EXTENDED,
-
                                      font=("Consolas",9))
-
         self._c_docx_lb.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0,6))
-
         self._c_docx_lb.bind("<Delete>", lambda e: self._c_remove_selected())
-
+        # Mỗi phần tử: chuỗi đường dẫn file, HOẶC dict {"kind":"text","label":...,"text":...}
+        # cho nguồn là văn bản dán trực tiếp (vd. lấy từ tab Dịch QT), không cần file trên đĩa.
         self._c_docx_files = []
         self._c_preview_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(docx_f, text="Với file .txt: xem trước & sửa chương trước khi tạo EPUB",
+        ttk.Checkbutton(docx_f, text="Với văn bản .txt / dán từ Dịch QT: xem trước & sửa chương trước khi tạo EPUB",
                         variable=self._c_preview_var).pack(anchor="w", padx=8, pady=(0, 6))
 
         # Thư mục lưu
-
         out_f = ttk.LabelFrame(left, text="Thư mục lưu EPUB")
-
         out_f.pack(fill=tk.X, pady=(0,6))
-
         self._c_outdir_var = tk.StringVar(value="Chưa chọn thư mục")
-
         ttk.Label(out_f, textvariable=self._c_outdir_var,
-
                   foreground="#888").pack(side=tk.LEFT, padx=8, pady=6, fill=tk.X, expand=True)
-
         ttk.Button(out_f, text="📁 Chọn",
-
                    command=self._c_pick_outdir).pack(side=tk.RIGHT, padx=(0,8), pady=6)
-
         self._c_outdir = ''
 
         ttk.Button(left, text="▶ Xuất EPUB", style="Accent.TButton",
-
                    command=self._c_run).pack(pady=4)
 
         # Phải: log
-
         right = ttk.LabelFrame(pw, text="Nhật ký")
-
         pw.add(right, weight=1)
-
         self._c_log = tk.Text(right, state=tk.DISABLED, wrap=tk.WORD,
-
                               font=("Consolas",9), background="#1a1a1a",
-
                               foreground="#cccccc")
-
         self._c_log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
         sb = ttk.Scrollbar(right, command=self._c_log.yview)
-
         self._c_log.configure(yscrollcommand=sb.set)
-
         return frame
 
     # ── PANEL GỘP EPUB ────────────────────────────────────
-
     def _build_merge(self, parent):
-
         frame = ttk.Frame(parent)
-
         pw = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
-
         pw.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         left = ttk.Frame(pw)
-
         pw.add(left, weight=2)
 
         info = ttk.LabelFrame(left, text="Thông tin bộ sách gộp (bỏ trống = tự lấy từ file đầu)")
-
         info.pack(fill=tk.X, pady=(0,6))
-
         ttk.Label(info, text="Tên truyện").grid(row=0, column=0, sticky=tk.W, padx=8, pady=4)
-
         self._m_title = ttk.Entry(info, width=30)
-
         self._m_title.grid(row=0, column=1, sticky=tk.EW, padx=(0,8), pady=4)
-
         ttk.Label(info, text="Tác giả").grid(row=1, column=0, sticky=tk.W, padx=8, pady=4)
-
         self._m_author = ttk.Entry(info, width=30)
-
         self._m_author.grid(row=1, column=1, sticky=tk.EW, padx=(0,8), pady=4)
-
         info.columnconfigure(1, weight=1)
 
         epub_f = ttk.LabelFrame(left, text="File EPUB cần gộp (theo thứ tự)")
-
         epub_f.pack(fill=tk.BOTH, expand=True, pady=(0,6))
-
         btn_row = ttk.Frame(epub_f)
-
         btn_row.pack(fill=tk.X, padx=6, pady=(6,4))
-
         ttk.Button(btn_row, text="＋ Thêm file EPUB",
-
                    command=self._m_add_epub).pack(side=tk.LEFT)
-
         ttk.Button(btn_row, text="⬆ Lên",
-
                    command=self._m_move_up).pack(side=tk.LEFT, padx=(6,0))
-
         ttk.Button(btn_row, text="⬇ Xuống",
-
                    command=self._m_move_down).pack(side=tk.LEFT, padx=(4,0))
-
         ttk.Button(btn_row, style="Pink.TButton", text="🗑 Xoá",
-
                    command=self._m_remove).pack(side=tk.RIGHT)
-
         self._m_epub_lb = tk.Listbox(epub_f, height=8, selectmode=tk.SINGLE,
-
                                      font=("Consolas",9))
-
         self._m_epub_lb.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0,6))
-
         self._m_epub_files = []
 
         out_f = ttk.LabelFrame(left, text="Thư mục lưu kết quả")
-
         out_f.pack(fill=tk.X, pady=(0,6))
-
         self._m_outdir_var = tk.StringVar(value="Chưa chọn thư mục")
-
         ttk.Label(out_f, textvariable=self._m_outdir_var,
-
                   foreground="#888").pack(side=tk.LEFT, padx=8, pady=6, fill=tk.X, expand=True)
-
         ttk.Button(out_f, text="📁 Chọn",
-
                    command=self._m_pick_outdir).pack(side=tk.RIGHT, padx=(0,8), pady=6)
-
         self._m_outdir = ''
 
         ttk.Button(left, text="🔗 Gộp EPUB", style="Accent.TButton", command=self._m_run).pack(pady=4)
 
         right = ttk.LabelFrame(pw, text="Nhật ký")
-
         pw.add(right, weight=1)
-
         self._m_log = tk.Text(right, state=tk.DISABLED, wrap=tk.WORD,
-
                               font=("Consolas",9), background="#1a1a1a",
-
                               foreground="#cccccc")
-
         self._m_log.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
         sb2 = ttk.Scrollbar(right, command=self._m_log.yview)
-
         self._m_log.configure(yscrollcommand=sb2.set)
-
         return frame
 
     # ── Helpers log ───────────────────────────────────────
-
     def _log(self, widget, msg):
-
         widget.configure(state=tk.NORMAL)
-
         widget.insert(tk.END, msg + '\n')
-
         widget.see(tk.END)
-
         widget.configure(state=tk.DISABLED)
 
     # ── Create actions ────────────────────────────────────
-
     def _c_pick_cover(self):
-
         p = filedialog.askopenfilename(
-
             title="Chọn ảnh bìa",
-
             filetypes=[("Ảnh","*.jpg *.jpeg *.png *.webp *.gif"),("Tất cả","*.*")]
-
         )
-
         if not p: return
-
         self._c_cover_path = p
-
         label = os.path.basename(p)
-
         try:
-
             size = os.path.getsize(p)
-
             if not p.lower().endswith(".webp"):
-
                 with open(p, "rb") as f:
-
                     webp = _image_bytes_to_webp(f.read())
-
                 if webp:
-
                     label = f"{os.path.basename(p)}  ({_fmt_kb(size)} → WebP {_fmt_kb(len(webp))} khi xuất)"
-
                 else:
-
                     label = f"{os.path.basename(p)}  ({_fmt_kb(size)})"
-
             else:
-
                 label = f"{os.path.basename(p)}  ({_fmt_kb(size)})"
-
         except Exception:
-
             pass
-
         self._c_cover_var.set(label)
 
     def _c_clear_cover(self):
-
         self._c_cover_path = ''
-
         self._c_cover_var.set("Chưa chọn ảnh bìa")
 
     def _c_add_docx(self):
@@ -2940,68 +2499,67 @@ class TabEpub(ttk.Frame):
             filetypes=[("Word / Văn bản", "*.docx *.txt"), ("Word", "*.docx"),
                        ("Văn bản (.txt)", "*.txt"), ("Tất cả", "*.*")]
         )
-
         for p in paths:
-
             if p not in self._c_docx_files:
-
                 self._c_docx_files.append(p)
-
                 self._c_docx_lb.insert(tk.END, os.path.basename(p))
 
     def _c_add_folder(self):
-
         folder = filedialog.askdirectory(title="Chọn thư mục chứa .docx / .txt")
-
         if not folder: return
-
         files = sorted([
-
             os.path.join(folder, f)
-
             for f in os.listdir(folder)
             if f.lower().endswith(('.docx', '.txt')) and not f.startswith('~$')
-
         ])
-
         for p in files:
-
             if p not in self._c_docx_files:
-
                 self._c_docx_files.append(p)
-
                 self._c_docx_lb.insert(tk.END, os.path.basename(p))
 
-    def _c_remove_selected(self):
-
-        sel = list(self._c_docx_lb.curselection())
-
-        if not sel:
-
-            messagebox.showinfo("Thông báo", "Chọn 1 hoặc nhiều file trong danh sách trước (giữ Ctrl để chọn nhiều).")
-
+    def _c_add_from_translate(self):
+        """Lấy trực tiếp văn bản đang có trong ô 'Kết quả dịch' của tab Dịch QT,
+        KHÔNG cần lưu ra file .txt rồi tải lên lại. Mỗi lần bấm tạo thêm 1 nguồn
+        văn bản trong danh sách, xử lý y hệt như 1 file .txt (xem trước & sửa chương)."""
+        tr = self.translate_tab
+        if tr is None:
+            messagebox.showerror("Lỗi", "Chưa kết nối với tab 'Dịch Trung → Việt'.", parent=self)
             return
+        text = tr.output_text.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showinfo(
+                "Chưa có kết quả dịch",
+                "Ô 'Kết quả dịch' ở tab Dịch QT đang trống.\n"
+                "Hãy dịch xong rồi quay lại bấm nút này.", parent=self)
+            return
+        default_label = (self._c_title.get().strip() or "Ket_qua_Dich_QT")
+        label = simpledialog.askstring(
+            "Đặt tên cho nguồn văn bản này",
+            "Tên hiển thị (dùng làm tên chương/tên file nếu tạo nhiều EPUB):",
+            initialvalue=default_label, parent=self)
+        label = (label or default_label).strip() or default_label
+        entry = {"kind": "text", "label": label, "text": text}
+        self._c_docx_files.append(entry)
+        self._c_docx_lb.insert(tk.END, f"📋 [Dịch QT] {label}  ({len(text):,} ký tự)")
+        self.status_hint = None
 
+    def _c_remove_selected(self):
+        sel = list(self._c_docx_lb.curselection())
+        if not sel:
+            messagebox.showinfo("Thông báo", "Chọn 1 hoặc nhiều file trong danh sách trước (giữ Ctrl để chọn nhiều).")
+            return
         for i in reversed(sel):
-
             self._c_docx_lb.delete(i)
-
             del self._c_docx_files[i]
 
     def _c_clear_docx(self):
-
         self._c_docx_files.clear()
-
         self._c_docx_lb.delete(0, tk.END)
 
     def _c_pick_outdir(self):
-
         d = filedialog.askdirectory(title="Chọn thư mục lưu EPUB")
-
         if not d: return
-
         self._c_outdir = d
-
         self._c_outdir_var.set(d)
 
     def _c_run(self):
@@ -3012,7 +2570,7 @@ class TabEpub(ttk.Frame):
             messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập Tên truyện.")
             return
         if not self._c_docx_files:
-            messagebox.showwarning("Thiếu file", "Vui lòng thêm ít nhất 1 file .docx hoặc .txt.")
+            messagebox.showwarning("Thiếu nguồn", "Vui lòng thêm ít nhất 1 file .docx/.txt hoặc lấy văn bản từ Dịch QT.")
             return
         if not self._c_outdir:
             messagebox.showwarning("Thiếu thư mục", "Vui lòng chọn thư mục lưu.")
@@ -3021,25 +2579,34 @@ class TabEpub(ttk.Frame):
         log = lambda m: self._log(self._c_log, m)
 
         def run():
-            files = list(self._c_docx_files)
+            entries = list(self._c_docx_files)
             used_names = set()
-            for fp in files:
-                fname = os.path.basename(fp)
-                use_title = title if len(files) == 1 else os.path.splitext(fname)[0]
-                log(f"[►] Đang xử lý: {fname}")
+            for entry in entries:
+                is_text_source = isinstance(entry, dict)
+                if is_text_source:
+                    fname = entry["label"]
+                    use_title = title if len(entries) == 1 else entry["label"]
+                    log(f"[►] Đang xử lý: {fname}  (văn bản dán từ Dịch QT)")
+                else:
+                    fp = entry
+                    fname = os.path.basename(fp)
+                    use_title = title if len(entries) == 1 else os.path.splitext(fname)[0]
+                    log(f"[►] Đang xử lý: {fname}")
                 try:
-                    if fp.lower().endswith('.txt'):
+                    if is_text_source:
+                        chapters = self._c_chapters_from_text(entry["text"], entry["label"], preview, log)
+                    elif fp.lower().endswith('.txt'):
                         chapters = self._c_chapters_from_txt(fp, preview, log)
-                        if chapters is None:
-                            log("    ⏭ Đã hủy ở cửa sổ xem trước — bỏ qua file này")
-                            continue
                     else:
                         html     = _read_docx_html(fp)
                         chapters = _split_chapters(html)
+                    if chapters is None:
+                        log("    ⏭ Đã hủy ở cửa sổ xem trước — bỏ qua nguồn này")
+                        continue
                     log(f"    {len(chapters)} chương tìm thấy")
                     base = re.sub(r'[\\/:*?"<>|]', '_', use_title)
                     name, n = base, 2
-                    while name.lower() in used_names:          # vd. a.docx và a.txt cùng tên
+                    while name.lower() in used_names:          # vd. 2 nguồn khác nhau trùng tên
                         name, n = f"{base} ({n})", n + 1
                     used_names.add(name.lower())
                     out = os.path.join(self._c_outdir, name + '.epub')
@@ -3051,14 +2618,14 @@ class TabEpub(ttk.Frame):
                 except Exception as e:
                     log(f"    ❌ Lỗi: {e}")
             log("═" * 40)
-            log("✅ Hoàn tất tất cả file!")
+            log("✅ Hoàn tất tất cả nguồn!")
         Thread(target=run, daemon=True).start()
 
-    def _c_chapters_from_txt(self, fp, preview, log):
-        """Đọc TXT -> danh sách chương (định dạng của _build_epub).
+    def _c_chapters_from_text(self, text, source_label, preview, log):
+        """Lõi dùng chung: 1 khối văn bản (không nhất thiết từ file) -> danh sách chương.
+        Dùng cho cả file .txt lẫn văn bản dán từ tab Dịch QT.
         Trả về None nếu người dùng hủy ở cửa sổ xem trước.
-        Hàm này chạy ở luồng nền: cửa sổ xem trước được mở trên luồng giao diện, luồng nền đứng đợi."""
-        text = read_text_file(fp)
+        Hàm này chạy ở luồng nền: cửa sổ xem trước mở trên luồng giao diện, luồng nền đứng đợi."""
         if not preview:
             chs, used_loose = auto_scan_chapters(text)
             if used_loose:
@@ -3069,7 +2636,7 @@ class TabEpub(ttk.Frame):
 
         def open_dialog():
             try:
-                ChapterPreviewDialog(self.winfo_toplevel(), text, os.path.basename(fp), on_done=q.put)
+                ChapterPreviewDialog(self.winfo_toplevel(), text, source_label, on_done=q.put)
             except Exception as e:                              # đừng để luồng nền treo mãi
                 q.put(e)
         self.after(0, open_dialog)
@@ -3078,15 +2645,18 @@ class TabEpub(ttk.Frame):
             raise result
         return None if result is None else txt_chapters_to_epub(result)
 
+    def _c_chapters_from_txt(self, fp, preview, log):
+        """Đọc file TXT trên đĩa rồi dùng chung lõi _c_chapters_from_text."""
+        text = read_text_file(fp)
+        return self._c_chapters_from_text(text, os.path.basename(fp), preview, log)
+
 
     # ── Merge actions ─────────────────────────────────────
-
     def _m_add_epub(self):
         paths = filedialog.askopenfilenames(
             title="Chọn file EPUB",
             filetypes=[("EPUB", "*.epub"), ("Tất cả", "*.*")]
         )
-
         for p in paths:
             if p not in self._m_epub_files:
                 self._m_epub_files.append(p)
@@ -3097,441 +2667,284 @@ class TabEpub(ttk.Frame):
 
     def _m_move_up(self):
         sel = self._m_epub_lb.curselection()
-
         if not sel or sel[0] == 0:
             return
-
         i = sel[0]
-
         self._m_epub_files[i - 1], self._m_epub_files[i] = (
             self._m_epub_files[i],
             self._m_epub_files[i - 1]
         )
-
         names = [
             os.path.basename(p)
             for p in self._m_epub_files
         ]
-
         self._m_epub_lb.delete(0, tk.END)
-
         for n in names:
             self._m_epub_lb.insert(tk.END, n)
-
         self._m_epub_lb.selection_set(i - 1)
 
     def _m_move_down(self):
         sel = self._m_epub_lb.curselection()
-
         if not sel or sel[0] >= len(self._m_epub_files) - 1:
             return
-
         i = sel[0]
-
         self._m_epub_files[i], self._m_epub_files[i + 1] = (
             self._m_epub_files[i + 1],
             self._m_epub_files[i]
         )
-
         names = [
             os.path.basename(p)
             for p in self._m_epub_files
         ]
-
         self._m_epub_lb.delete(0, tk.END)
-
         for n in names:
             self._m_epub_lb.insert(tk.END, n)
-
         self._m_epub_lb.selection_set(i + 1)
 
     def _m_remove(self):
         sel = self._m_epub_lb.curselection()
-
         if not sel:
             return
-
         i = sel[0]
-
         self._m_epub_files.pop(i)
         self._m_epub_lb.delete(i)
 
     def _m_pick_outdir(self):
-
         d = filedialog.askdirectory(title="Chọn thư mục lưu")
-
         if not d: return
-
         self._m_outdir = d
-
         self._m_outdir_var.set(d)
 
     def _m_run(self):
-
         if len(self._m_epub_files) < 2:
-
             messagebox.showwarning("Thiếu file", "Cần ít nhất 2 file EPUB để gộp.")
-
             return
-
         if not self._m_outdir:
-
             messagebox.showwarning("Thiếu thư mục", "Vui lòng chọn thư mục lưu.")
-
             return
-
         title  = self._m_title.get().strip()
-
         author = self._m_author.get().strip()
 
         def run():
-
             all_chapters = []
-
             first = None
-
             for ep in self._m_epub_files:
-
                 self._log(self._m_log, f"[►] Đọc: {os.path.basename(ep)}")
-
                 try:
-
                     data = _read_epub(ep)
-
                     if first is None:
-
                         first = data
-
                     all_chapters.extend(data['chapters'])
-
                     self._log(self._m_log, f"    {len(data['chapters'])} chương")
-
                 except Exception as e:
-
                     self._log(self._m_log, f"    ❌ Lỗi: {e}")
-
                     return
-
             merged_title  = title  or (first['title']  if first else 'Gop_EPUB')
-
             merged_author = author or (first['author']  if first else 'Unknown')
-
             merged_desc   = first['description'] if first else ''
 
             # Tạm lưu cover từ first epub
-
             cover_path = ''
-
             if first and first.get('cover_data'):
-
                 ext = first.get('cover_ext', '.jpg')
-
                 import tempfile
-
                 tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-
                 tmp.write(first['cover_data'])
-
                 tmp.close()
-
                 cover_path = tmp.name
 
             out_name = re.sub(r'[\\/:*?"<>|]','_', merged_title) + '.epub'
-
             out_path = os.path.join(self._m_outdir, out_name)
-
             self._log(self._m_log, f"[►] Đang gộp {len(all_chapters)} chương...")
-
             try:
-
                 _build_epub(merged_title, merged_author, merged_desc,
-
                             cover_path, all_chapters, out_path,
-
                             log=lambda m: self._log(self._m_log, m))
-
                 self._log(self._m_log, f"✅ Xong → {out_name}")
-
                 if cover_path and os.path.exists(cover_path):
-
                     os.unlink(cover_path)
-
             except Exception as e:
-
                 self._log(self._m_log, f"❌ Lỗi khi build EPUB: {e}")
-
         Thread(target=run, daemon=True).start()
 
 # ═══════════════════════════════════════════════════════════
-
 #  PHẦN 8 — TAB 5: DỊCH TRUNG → VIỆT (offline, dựa trên từ điển)
-
 #  Engine port từ translateZhToVi.js (Name.json + VP.json + HanViet.json)
-
 # ═══════════════════════════════════════════════════════════
 
 import sys
-
 import json
-
 import threading
-
 import urllib.request
-
 from tkinter import scrolledtext, simpledialog
 
 TRANS_DEFAULT_SETTINGS = {
-
     "nameUrl": "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/Name.json",
-
     "vpUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/VP.json",
-
     "hvUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/HanViet.json",
-
     "maxMatchLen": 30,
-
     "priorityNameFirst": True,
-
     "punctMap": "vietnamese",
-
     # Dịch qua server (như app gốc)
-
     "serverUrl": "https://dichngay.com/translate/text",
-
     "delayMs": 400,
-
     "maxChars": 4500,
-
 }
 
 def _trans_app_dir():
     return APP_DATA_DIR
 
 TRANS_DICT_DIR = os.path.join(_trans_app_dir(), "dict")
-
 TRANS_CONFIG_PATH = os.path.join(_trans_app_dir(), "translator_config.json")
 
-_TRANS_CJK_RE = re.compile(r'[㐀-䶿一-鿿豈-﫿]')
+_TRANS_CJK_RE = re.compile(r'[㐀-䶿一-鿿豈-﫿]')
 
 def _trans_is_cjk(ch):
-
     return bool(_TRANS_CJK_RE.match(ch))
 
 def _trans_split_runs(s):
-
     """Tách chuỗi thành các run CJK / OTHER (port splitRuns)."""
-
     runs, buf, mode = [], "", None
-
     for ch in s:
-
         now = "CJK" if _trans_is_cjk(ch) else "OTHER"
-
         if mode is None:
-
             buf, mode = ch, now
-
             continue
-
         if now == mode:
-
             buf += ch
-
         else:
-
             runs.append((mode, buf))
-
             buf, mode = ch, now
-
     if buf:
-
         runs.append((mode, buf))
-
     return runs
 
 def _trans_normalize_dict(raw):
-
     """Chuẩn hoá dict về {key: {val, alts, skip?}} (port normalizeDictAny)."""
-
     out = {}
-
     for k, v in raw.items():
-
         if not k or v is None:
-
             continue
-
         if isinstance(v, str):
-
             parts = [x.strip() for x in v.split("/")]
-
             first = parts[0] if parts else ""
-
             if first == "":
-
                 out[k] = {"val": "", "alts": parts if parts else [""], "skip": True}
-
             else:
-
                 out[k] = {"val": first, "alts": parts if parts else [first]}
-
         elif isinstance(v, dict) and "val" in v:
-
             val = str(v.get("val") or "").strip()
-
             alts = [str(x).strip() for x in v.get("alts", []) if str(x).strip()] if isinstance(v.get("alts"), list) else ([val] if val else [])
-
             entry = {"val": val, "alts": alts if alts else [val]}
-
             if val == "":
-
                 entry["skip"] = True
-
             out[k] = entry
-
         else:
-
             s = str(v).strip()
-
             out[k] = {"val": s, "alts": [s]}
-
     return out
 
 def _trans_build_buckets(d):
-
     """Gom key theo độ dài (port buildBucketsFromDict). → (buckets, maxLen)"""
-
     buckets, max_len = {}, 0
-
     for k, v in d.items():
-
         l = len(k)
-
         if l == 0:
-
             continue
-
         buckets.setdefault(l, {})[k] = v
-
         if l > max_len:
-
             max_len = l
-
     return buckets, max_len
 
 _TRANS_EMPTY_IDX = ({}, 0)
 
 def _trans_longest_match(text, user_idx, name_idx, vp_idx, hv_dict, opts):
-
     """Khớp dài-nhất-toàn-cục trên 1 run CJK (port globalLongestMatch).
-
     Ưu tiên: bộ name của người dùng > Name/VP (theo priorityNameFirst) > Hán-Việt từng chữ.
-
     """
-
     N = len(text)
-
     max_from_dict = max(user_idx[1], name_idx[1], vp_idx[1])
-
     mm = opts.get("maxMatchLen") or 0
-
     max_len = min(mm, max_from_dict) if mm else max_from_dict
-
     replaced = [False] * N
-
     slots = [None] * N
-
     prio_name = opts.get("priorityNameFirst", True)
 
     for l in range(max_len, 0, -1):
-
         ub = user_idx[0].get(l)
-
         nb = name_idx[0].get(l)
-
         vb = vp_idx[0].get(l)
-
         if not ub and not nb and not vb:
-
             continue
-
         for i in range(0, N - l + 1):
-
             if any(replaced[i:i + l]):
-
                 continue
-
             sub = text[i:i + l]
-
             hit_user = ub.get(sub) if ub else None
-
             hit_name = nb.get(sub) if nb else None
-
             hit_vp = vb.get(sub) if vb else None
-
             if hit_user is not None:
-
                 chosen, source = hit_user, "User"
-
             elif hit_name and hit_vp:
-
                 chosen, source = (hit_name, "Name") if prio_name else (hit_vp, "VP")
-
             elif hit_name:
-
                 chosen, source = hit_name, "Name"
-
             elif hit_vp:
-
                 chosen, source = hit_vp, "VP"
-
             else:
-
                 continue
-
             if chosen.get("skip"):
-
                 slots[i] = {"zh": sub, "val": "", "alts": chosen.get("alts", []), "source": "SKIP", "len": l}
-
             else:
-
                 slots[i] = {"zh": sub, "val": chosen["val"], "alts": chosen.get("alts") or [chosen["val"]], "source": source, "len": l}
-
             for k in range(l):
-
                 replaced[i + k] = True
 
     items, i = [], 0
-
     while i < N:
-
         s = slots[i]
-
         if s:
-
             items.append(s)
-
             i += s["len"]
-
         else:
-
             ch = text[i]
-
             hv = hv_dict.get(ch)
-
             v = hv["val"] if hv else ch
-
             items.append({"zh": ch, "val": v, "alts": [v], "source": "HanViet" if hv else "RAW", "len": 1})
-
             i += 1
-
     return items
 
 _TRANS_NO_SPACE_BEFORE = set('.,:;!?…%»”』)]}，。、：；？！」》')
-
 _TRANS_NO_SPACE_AFTER = set('([{«“『「《')
-
 _TRANS_SENTENCE_END = set('.!?\n。！？')
+
+def _trans_capitalize_sentence_starts(text):
+    """Viết hoa đầu câu và sau dấu mở thoại, giữ nguyên độ dài chuỗi."""
+    result = []
+    capitalize_next = True
+    inside_quote = False
+    openers = set('[([“‘「『【')
+    for ch in text:
+        if ch == '"':
+            if not inside_quote:
+                capitalize_next = True
+            inside_quote = not inside_quote
+            result.append(ch)
+        elif ch in _TRANS_SENTENCE_END:
+            capitalize_next = True
+            result.append(ch)
+        elif ch in openers:
+            capitalize_next = True
+            result.append(ch)
+        elif ch.isspace():
+            result.append(ch)
+        elif capitalize_next:
+            upper = ch.upper()
+            result.append(upper if ch.islower() and len(upper) == 1 else ch)
+            capitalize_next = False
+        else:
+            result.append(ch)
+    return "".join(result)
 
 def _trans_join_pretty(tokens, with_spans=False):
     """Nối token, giữ dấu câu, viết hoa sau dấu kết câu và đầu chuỗi."""
@@ -3556,365 +2969,259 @@ def _trans_join_pretty(tokens, with_spans=False):
         result += val
         if with_spans:
             spans.append((tok["zh"], val, start, len(result)))
-    
+
+    result = _trans_capitalize_sentence_starts(result)
     if with_spans:
+        spans = [(zh, result[start:end], start, end) for zh, _val, start, end in spans]
         return result.strip(), spans
     return result.strip()
 
 _TRANS_PUNCT_MAPS = {
-
     "ascii": {
-
         "，": ",", "。": ".", "：": ":", "；": ";", "？": "?", "！": "!",
-
         "、": ",", "（": "(", "）": ")", "【": "[", "】": "]", "—": "-", "～": "~",
-
         "「": "“", "」": "”", "『": "“", "』": "”", "《": "<", "》": ">",
-
     },
-
     "vietnamese": {
-
         "，": ",", "。": ".", "：": ":", "；": ";", "？": "?", "！": "!",
-
         "、": ",", "（": "(", "）": ")",
-
         "「": "“", "」": "”", "『": "“", "』": "”",
-
         "《": "«", "》": "»",
-
     },
-
 }
 
 def _trans_map_punct(s, style="vietnamese"):
-
     if not s:
-
         return s
-
     m = _TRANS_PUNCT_MAPS.get(style, _TRANS_PUNCT_MAPS["vietnamese"])
-
     for k, v in m.items():
-
         s = s.replace(k, v)
-
     return s
 
 def _trans_capitalize_word(w):
-
     return (w[0].upper() + w[1:]) if w else w
 
 def trans_progressive_capitalizations(s):
-
     """'lâm phong' → ['lâm phong', 'Lâm phong', 'Lâm Phong', ...]"""
-
     s = (s or "").strip()
-
     if not s:
-
         return []
-
     words = s.split()
-
     outs = []
-
     for i in range(0, len(words) + 1):
-
         cand = " ".join(_trans_capitalize_word(w) if j < i else w.lower() for j, w in enumerate(words))
-
         if cand not in outs:
-
             outs.append(cand)
-
     return outs
 
 class ZhViTranslator:
-
     """Engine dịch Trung→Việt offline (port từ translateZhToVi.js)."""
 
     def __init__(self):
-
         self.ready = False
-
         self.name_raw, self.vp_raw, self.hv_dict = {}, {}, {}
-
         self.name_idx, self.vp_idx = _TRANS_EMPTY_IDX, _TRANS_EMPTY_IDX
 
-    def load(self, name_path, vp_path, hv_path):
-
+    def load(self, name_path, vp_path, hv_path, overlays=None):
         def read_json(path):
-
             if path and os.path.exists(path):
-
                 with open(path, "r", encoding="utf-8") as f:
-
                     return json.load(f)
-
             return {}
-
-        self.name_raw = _trans_normalize_dict(read_json(name_path))
-
-        self.vp_raw = _trans_normalize_dict(read_json(vp_path))
-
-        self.hv_dict = _trans_normalize_dict(read_json(hv_path))
-
+        overlays = overlays or {}
+        name_data = read_json(name_path)
+        vp_data = read_json(vp_path)
+        hv_data = read_json(hv_path)
+        name_data.update(overlays.get("name", {}))
+        vp_data.update(overlays.get("vp", {}))
+        hv_data.update(overlays.get("hanviet", {}))
+        self.name_raw = _trans_normalize_dict(name_data)
+        self.vp_raw = _trans_normalize_dict(vp_data)
+        self.hv_dict = _trans_normalize_dict(hv_data)
         self.name_idx = _trans_build_buckets(self.name_raw)
-
         self.vp_idx = _trans_build_buckets(self.vp_raw)
-
         self.ready = True
 
     def stats(self):
-
         return f"Name {len(self.name_raw):,} | VP {len(self.vp_raw):,} | HánViệt {len(self.hv_dict):,}"
 
     def build_user_idx(self, name_set):
-
         return _trans_build_buckets(_trans_normalize_dict(name_set or {}))
 
     def translate_line(self, line, user_idx=None, opts=None, target="vi", with_spans=False):
-
         opts = dict(TRANS_DEFAULT_SETTINGS, **(opts or {}))
-
         user_idx = user_idx or _TRANS_EMPTY_IDX
-
         tokens = []
-
         for mode, run in _trans_split_runs(line):
-
             if mode == "CJK":
-
                 if target == "hv":
-
                     for ch in run:
-
                         hv = self.hv_dict.get(ch)
-
                         v = hv["val"] if hv else ch
-
                         tokens.append({"zh": ch, "val": v, "alts": [v], "source": "HanViet"})
-
                 else:
-
                     tokens.extend(_trans_longest_match(run, user_idx, self.name_idx, self.vp_idx, self.hv_dict, opts))
-
             else:
-
                 tokens.append({"zh": run, "val": run, "alts": [run], "source": "TEXT"})
-
         if with_spans:
-
             out, spans = _trans_join_pretty(tokens, with_spans=True)
-
         else:
-
             out, spans = _trans_join_pretty(tokens), None
-
         if opts.get("punctMap"):
-
             out = _trans_map_punct(out, opts["punctMap"])   # map 1 ký tự → 1 ký tự nên span không lệch
-
         return (out, spans) if with_spans else out
 
     def translate_chunks(self, chunks, name_set, opts=None, progress_cb=None, target="vi", with_spans=False):
-
         user_idx = self.build_user_idx(name_set)
-
         total = max(len(chunks), 1)
-
         results, spans_list = [], []
-
         for i, c in enumerate(chunks):
-
             if not c.strip():
-
                 out, spans = "", []
-
             elif with_spans:
-
                 out, spans = self.translate_line(c, user_idx, opts, target, with_spans=True)
-
             else:
-
                 out, spans = self.translate_line(c, user_idx, opts, target), []
-
             results.append(out)
-
             spans_list.append(spans or [])
-
             if progress_cb and (i % 20 == 0 or i == total - 1):
-
                 progress_cb(f"Đang dịch {i + 1}/{total} dòng...", (i + 1) * 100 // total)
-
         return (results, spans_list) if with_spans else results
 
     def hanviet_of(self, term):
-
         parts = []
-
         for ch in term:
-
             hv = self.hv_dict.get(ch)
-
             parts.append(hv["val"] if hv else ch)
-
         return " ".join(p for p in parts if p).strip()
 
+    def hanviet_prefer_name(self, term, user_idx=None):
+        """Hán Việt cho 1 cụm (vd. tên nhân vật), nhưng ƯU TIÊN nghĩa đã có sẵn
+        trong Name.json (khớp dài nhất) trước; chỉ phần chữ nào Name.json CHƯA có
+        mới ghép Hán Việt từng chữ theo HanViet.json.
+
+        Ví dụ: term = "萧景刚". Nếu "萧景" đã có trong Name.json (vd. "Tiêu Cảnh") thì
+        kết quả là "Tiêu Cảnh" + Hán Việt riêng của chữ "刚" còn lại, thay vì ghép
+        Hán Việt từng chữ "萧/景/刚" ngay từ đầu.
+        """
+        if not term:
+            return ""
+        user_idx = user_idx or _TRANS_EMPTY_IDX
+        # maxMatchLen=0 -> để _trans_longest_match tự lấy độ dài lớn nhất có trong
+        # user_idx/name_idx (không giới hạn theo cấu hình dịch "vi" thông thường).
+        opts = {"maxMatchLen": 0, "priorityNameFirst": True}
+        items = []
+        for mode, run in _trans_split_runs(term):
+            if mode == "CJK":
+                items.extend(_trans_longest_match(run, user_idx, self.name_idx, _TRANS_EMPTY_IDX, self.hv_dict, opts))
+            else:
+                items.append({"zh": run, "val": run, "alts": [run], "source": "TEXT"})
+        return _trans_join_pretty(items)
+
     def suggest(self, term, limit=50):
-
         """Gợi ý dịch cho 1 cụm (port suggestName)."""
-
         res = []
-
         if term in self.name_raw:
-
             e = self.name_raw[term]
-
             res.append({"source": "Name", "zh": term, "val": e["val"], "alts": e["alts"]})
-
         if term in self.vp_raw:
-
             e = self.vp_raw[term]
-
             res.append({"source": "VP", "zh": term, "val": e["val"], "alts": e["alts"]})
-
         if res:
-
             return res
-
         for raw, label in ((self.name_raw, "Name"), (self.vp_raw, "VP")):
-
             cnt = 0
-
             for k, e in raw.items():
-
                 if cnt >= limit:
-
                     break
-
                 if term in k or k in term:
-
                     res.append({"source": label, "zh": k, "val": e["val"], "alts": e["alts"]})
-
                     cnt += 1
-
         if res:
-
             return res[:limit]
-
         t = self.translate_line(term)
-
         return [{"source": "Fallback", "zh": term, "val": t, "alts": [t]}]
 
 def _trans_mirror_urls(url):
-
     """Trả về [url gốc, mirror jsdelivr] — raw.githubusercontent hay bị chặn ở VN."""
-
     urls = [url] if url else []
-
     m = re.match(r'https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)', url or "")
-
     if m:
-
         urls.append(f"https://cdn.jsdelivr.net/gh/{m.group(1)}/{m.group(2)}@{m.group(3)}/{m.group(4)}")
-
     return urls
 
 def _trans_download(url, dest, timeout=90):
-
     """Tải file, tự thử mirror nếu nguồn chính lỗi."""
-
     last_err = None
-
     for u in _trans_mirror_urls(url):
-
         try:
-
             req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-
             with urllib.request.urlopen(req, timeout=timeout) as r:
-
                 data = r.read()
-
             with open(dest, "wb") as f:
-
                 f.write(data)
-
             return
-
         except Exception as e:
-
             last_err = e
-
     raise last_err if last_err else RuntimeError("Không có URL tải.")
 
+def _trans_remote_tag(url):
+    for remote_url in _trans_mirror_urls(url):
+        try:
+            req = urllib.request.Request(remote_url, headers={"User-Agent": "SLHTool"}, method="HEAD")
+            with urllib.request.urlopen(req, timeout=15) as response:
+                return response.headers.get("ETag") or response.headers.get("Last-Modified")
+        except Exception:
+            continue
+    return None
+
 def trans_load_config():
-
     cfg = {}
-
     try:
-
         with open(TRANS_CONFIG_PATH, "r", encoding="utf-8") as f:
-
             cfg = json.load(f)
-
     except Exception:
-
         cfg = {}
-
     cfg.setdefault("nameSets", {"Mặc định": {}})
-
     if not cfg["nameSets"]:
-
         cfg["nameSets"] = {"Mặc định": {}}
-
     cfg.setdefault("activeNameSet", list(cfg["nameSets"].keys())[0])
-
     settings = dict(TRANS_DEFAULT_SETTINGS)
-
     settings.update(cfg.get("translator_settings", {}))
-
     cfg["translator_settings"] = settings
-
     return cfg
+
+def _ordered_name_set_names(name_sets):
+    names = sorted(name_sets, key=str.casefold)
+    if "Mặc định" in name_sets:
+        names.remove("Mặc định")
+        names.insert(0, "Mặc định")
+    return names
 
 def trans_save_config(cfg):
     with open(TRANS_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 # ═══════════════════════════════════════════════════════════
-
 #  DỊCH QUA SERVER (dichngay.com) — port từ app/core/translator.py
-
 # ═══════════════════════════════════════════════════════════
 
 import time as _time
-
 import unicodedata as _ud
 
 _SRV_CJK_RE = re.compile(r"[㐀-鿿]")
-
 _SRV_INVISIBLE_RE = re.compile("[­​-‏‪-‮⁠-⁤⁦-⁯﻿]")
-
 _SRV_INLINE_SPACE_RE = re.compile(r"[ \t\f\v]+")
 
 def _srv_is_wordish_char(ch):
-
     if not ch:
-
         return False
-
     try:
-
         return _ud.category(ch)[0] in {"L", "N", "M"}
-
     except Exception:
-
         return False
 
 def _srv_should_attach_quote_left(ch):
-
     return _srv_is_wordish_char(ch) or ch in {".", "!", "?", ",", "…"}
 
 def srv_normalize_input(text):
@@ -3926,711 +3233,368 @@ def srv_normalize_input(text):
     return _SRV_INVISIBLE_RE.sub("", value)
 
 def _srv_normalize_straight_quote_pairs(text):
-
     if not text:
-
         return ""
-
     result = []
-
     inside_quote = False
-
     i, n = 0, len(text)
-
     while i < n:
-
         ch = text[i]
-
         if ch != '"':
-
             result.append(ch)
-
             i += 1
-
             continue
-
         if not inside_quote:
-
             prev = result[-1] if result else ""
-
             if prev and not (prev.isspace() or prev in "([{"):
-
                 result.append(" ")
-
             result.append('"')
-
             i += 1
-
             while i < n and text[i] in " \t\f\v":
-
                 i += 1
-
             inside_quote = True
-
             continue
-
         while result and result[-1] in " \t\f\v":
-
             result.pop()
-
         result.append('"')
-
         i += 1
-
         while i < n and text[i] in " \t\f\v":
-
             i += 1
-
         if i < n and _srv_is_wordish_char(text[i]):
-
             result.append(" ")
-
         inside_quote = False
-
     return "".join(result)
 
 def srv_normalize_translated(text):
-
     value = srv_normalize_input(text)
-
     if not value:
-
         return ""
-
     value = re.sub(r'\\+\s*(["”“‘’])', r"\1", value)
-
     value = _srv_normalize_straight_quote_pairs(value)
-
     value = re.sub(r'([:;,])([“‘])', r"\1 \2", value)
-
     value = re.sub(r'(^|[\s([{:])([“‘])[ \t\f\v]+', r"\1\2", value, flags=re.MULTILINE)
-
     value = re.sub(
-
         r'(\S)[ \t\f\v]+([”’])',
-
         lambda m: f"{m.group(1)}{m.group(2)}" if _srv_should_attach_quote_left(m.group(1)) else m.group(0),
-
         value,
-
     )
-
     value = re.sub(
-
         r'([”’])([^\s\n])',
-
         lambda m: f'{m.group(1)} {m.group(2)}' if _srv_is_wordish_char(m.group(2)) else m.group(0),
-
         value,
-
     )
-
     value = re.sub(r"[ \t]+\n", "\n", value)
-
     value = re.sub(r"\n[ \t]+", "\n", value)
-
     value = _SRV_INLINE_SPACE_RE.sub(" ", value)
-
     value = re.sub(r"\n{3,}", "\n\n", value)
 
-    # ✅ Capitalize từ đầu dòng
-    lines = value.split('\n')
-    capitalized_lines = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped and 'a' <= stripped[0] <= 'z':
-            leading_spaces = line[:len(line) - len(stripped)]
-            capitalized_lines.append(leading_spaces + stripped[0].upper() + stripped[1:])
-        else:
-            capitalized_lines.append(line)
-    value = '\n'.join(capitalized_lines)
-
-    return value.strip()
+    return _trans_capitalize_sentence_starts(value).strip()
 
 def _srv_build_name_replacer(name_set):
-
     sorted_keys = sorted(name_set.keys(), key=len, reverse=True)
-
     placeholder_map = {}
 
     def replacer(text):
-
         output_text = text
-
         for key in sorted_keys:
-
             if not key:
-
                 continue
-
             if key in output_text:
-
                 if key not in [v['orig'] for v in placeholder_map.values()]:
-
                     placeholder_id = f"__TM_NAME_{len(placeholder_map)}__"
-
                     placeholder_map[placeholder_id] = {'orig': key, 'viet': name_set[key]}
-
                 found = next((pid for pid, d in placeholder_map.items() if d['orig'] == key), None)
-
                 if found:
-
                     output_text = output_text.replace(key, found)
-
         return output_text
-
     return replacer, placeholder_map
 
 def _srv_restore_names(text, placeholder_map):
-
     if not text or not placeholder_map:
-
         return text
-
     result = text
-
     for placeholder, data in placeholder_map.items():
-
         result = re.sub(re.escape(placeholder), f"{data['viet']} ", result)
-
     result = re.sub(r"\s+([,.;!?\)]|”|’|:)", r"\1", result)
-
     result = re.sub(r"([(\[“‘])\s+", r"\1", result)
 
     def _colon_spacing(match):
-
         next_char = match.group(1)
-
         prev_char = match.string[match.start() - 1] if match.start() > 0 else ""
-
         if next_char == "/" or (prev_char.isdigit() and next_char.isdigit()):
-
             return f":{next_char}"
-
         return f": {next_char}"
 
     result = re.sub(r":([^\s])", _colon_spacing, result)
-
     result = _SRV_INLINE_SPACE_RE.sub(" ", result)
-
-    # ✅ Capitalize từ đầu dòng
-    lines = result.split('\n')
-    capitalized_lines = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped and 'a' <= stripped[0] <= 'z':
-            leading_spaces = line[:len(line) - len(stripped)]
-            capitalized_lines.append(leading_spaces + stripped[0].upper() + stripped[1:])
-        else:
-            capitalized_lines.append(line)
-    result = '\n'.join(capitalized_lines)
 
     return srv_normalize_translated(result)
 
 def _srv_split_batches(text_list, max_chars):
-
     batches, current, cur_len = [], [], 0
-
     max_chars = max(100, min(9000, int(max_chars or 4500)))
-
     for text in text_list:
-
         tl = len(text)
-
         if (cur_len + tl > max_chars) and current:
-
             batches.append(current)
-
             current, cur_len = [text], tl
-
         else:
-
             current.append(text)
-
             cur_len += tl
-
     if current:
-
         batches.append(current)
-
     return batches
 
 def _srv_count_cjk(text):
-
     return len(_SRV_CJK_RE.findall(str(text or "")))
 
 def _srv_looks_untranslated(source_text, translated_text):
-
     source = str(source_text or "").strip()
-
     translated = str(translated_text or "").strip()
-
     if not source or not translated:
-
         return False
-
     if translated.startswith("[Lỗi"):
-
         return False
-
     source_cjk = _srv_count_cjk(source)
-
     if source_cjk <= 0:
-
         return False
-
     translated_cjk = _srv_count_cjk(translated)
-
     if translated == source:
-
         return True
-
     if translated_cjk >= max(2, int(source_cjk * 0.55)):
-
         return True
-
     source_compact = re.sub(r"[\s\W_]+", "", source)
-
     translated_compact = re.sub(r"[\s\W_]+", "", translated)
-
     if source_compact and translated_compact and source_compact == translated_compact:
-
         return True
-
     return False
 
 def _srv_decode_loose_escape(ch):
-
     return {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}.get(ch, ch)
 
 def _srv_parse_loose_json_array(content):
-
     if isinstance(content, list):
-
         return [str(item or "") for item in content]
-
     raw = str(content or "").strip()
-
     if not raw:
-
         return []
-
     try:
-
         parsed = json.loads(raw)
-
         if isinstance(parsed, list):
-
             return [str(item or "") for item in parsed]
-
     except Exception:
-
         pass
-
     body = raw
-
     if body.startswith("["):
-
         body = body[1:]
-
     if body.endswith("]"):
-
         body = body[:-1]
-
     items = []
-
     i, n = 0, len(body)
-
     while i < n:
-
         while i < n and body[i] in " \t\r\n,":
-
             i += 1
-
         if i >= n:
-
             break
-
         if body[i] != '"':
-
             start = i
-
             while i < n and body[i] != ",":
-
                 i += 1
-
             token = body[start:i].strip()
-
             if token:
-
                 items.append(token)
-
             continue
-
         i += 1
-
         buf = []
-
         while i < n:
-
             ch = body[i]
-
             if ch == "\\":
-
                 i += 1
-
                 if i >= n:
-
                     buf.append("\\")
-
                     break
-
                 next_ch = body[i]
-
                 if next_ch == "u" and i + 4 < n:
-
                     hex_part = body[i + 1:i + 5]
-
                     try:
-
                         buf.append(chr(int(hex_part, 16)))
-
                         i += 5
-
                         continue
-
                     except Exception:
-
                         buf.append("u")
-
                         i += 1
-
                         continue
-
                 buf.append(_srv_decode_loose_escape(next_ch))
-
                 i += 1
-
                 continue
-
             if ch == '"':
-
                 j = i + 1
-
                 while j < n and body[j] in " \t\r\n":
-
                     j += 1
-
                 if j >= n or body[j] == ",":
-
                     i = j + 1 if j < n and body[j] == "," else j
-
                     break
-
                 buf.append('"')
-
                 i += 1
-
                 continue
-
             buf.append(ch)
-
             i += 1
-
         items.append("".join(buf))
-
     return [str(item or "") for item in items]
 
 _SRV_HTTP_HEADERS = {
-
     'Content-Type': 'application/json',
-
     'Referer': 'https://dichngay.com/',
-
     'Origin': 'https://dichngay.com',
-
     'Accept': 'application/json, text/plain, */*',
-
     'Accept-Encoding': 'identity',
-
     'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-
                    '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'),
-
 }
 
 def _srv_urlopen(req, timeout):
-
     """urlopen kèm fallback khi máy thiếu chứng chỉ SSL."""
-
     import ssl
-
     try:
-
         return urllib.request.urlopen(req, timeout=timeout)
-
     except urllib.error.URLError as e:
-
         reason = getattr(e, "reason", None)
-
         if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
-
             ctx = ssl._create_unverified_context()
-
             return urllib.request.urlopen(req, timeout=timeout, context=ctx)
-
         raise
 
 def _srv_post_batch(content_array, server_url, target_lang='vi',
-
                     retry_count=2, retry_backoff_ms=700, timeout_sec=60):
-
     payload = {'content': json.dumps(content_array, ensure_ascii=False), 'tl': target_lang}
-
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
     headers = dict(_SRV_HTTP_HEADERS)
-
     attempts = max(1, int(retry_count or 0) + 1)
-
     last_request_error = None
-
     for attempt in range(attempts):
-
         try:
-
             req = urllib.request.Request(server_url, data=body, headers=headers, method="POST")
-
             with _srv_urlopen(req, timeout=max(10, int(timeout_sec or 60))) as resp:
-
                 json_response = json.loads(resp.read().decode("utf-8", errors="replace"))
-
             translated_content = (json_response.get('data') or {}).get('content')
-
             if translated_content in (None, ""):
-
                 translated_content = json_response.get('translatedText', [])
-
             parsed = [srv_normalize_translated(item) for item in _srv_parse_loose_json_array(translated_content)]
-
             if len(parsed) == len(content_array):
-
                 return parsed
-
             if parsed:
-
                 return parsed
-
         except Exception as e:
-
             last_request_error = e
-
         if attempt < attempts - 1:
-
             _time.sleep(max(0.1, int(retry_backoff_ms or 700) / 1000.0))
-
     if last_request_error is not None:
-
         return [f"[Lỗi mạng: {last_request_error}]"] * len(content_array)
-
     return ["[Lỗi server response]"] * len(content_array)
 
 def _srv_needs_retry(source_text, translated_text):
-
     source = srv_normalize_input(source_text).strip()
-
     translated = srv_normalize_translated(translated_text).strip()
-
     if not source:
-
         return False
-
     if (not translated) or translated.startswith("[Lỗi"):
-
         return True
-
     return _srv_looks_untranslated(source, translated)
 
 def _srv_translate_single_final(text, server_url, **kw):
-
     translated = _srv_post_batch([text], server_url, **kw)
-
     candidate = translated[0] if translated else ""
-
     if _srv_needs_retry(text, candidate):
-
         return srv_normalize_translated(text)
-
     return srv_normalize_translated(candidate)
 
 def _srv_translate_failed_batch_final(content_array, server_url, **kw):
-
     if not content_array:
-
         return []
-
     translated = _srv_post_batch(content_array, server_url, **kw)
-
     if len(translated) == len(content_array):
-
         return [
-
             srv_normalize_translated(item) if not _srv_needs_retry(source, item)
-
             else _srv_translate_single_final(source, server_url, **kw)
-
             for source, item in zip(content_array, translated)
-
         ]
-
     if len(content_array) <= 1:
-
         return [_srv_translate_single_final(content_array[0], server_url, **kw)]
-
     mid = max(1, len(content_array) // 2)
-
     return (_srv_translate_failed_batch_final(content_array[:mid], server_url, **kw)
-
             + _srv_translate_failed_batch_final(content_array[mid:], server_url, **kw))
 
 def _srv_retry_suspicious(source_texts, server_url, max_chars=4500, **kw):
-
     if not source_texts:
-
         return []
-
     retry_chars = max(300, min(1800, int(max_chars or 4500)))
-
     batches = _srv_split_batches(source_texts, retry_chars)
-
     results = []
-
     for batch in batches:
-
         translated = _srv_post_batch(batch, server_url, **kw)
-
         if len(translated) != len(batch):
-
             results.extend(_srv_translate_failed_batch_final(batch, server_url, **kw))
-
             continue
-
         for source_text, translated_text in zip(batch, translated):
-
             if _srv_needs_retry(source_text, translated_text):
-
                 results.append(_srv_translate_single_final(source_text, server_url, **kw))
-
             else:
-
                 results.append(srv_normalize_translated(translated_text))
-
     return results
 
 def _srv_translate_batch_resilient(content_array, server_url, **kw):
-
     if not content_array:
-
         return []
-
     translated = _srv_post_batch(content_array, server_url, **kw)
-
     if len(translated) != len(content_array):
-
         return _srv_translate_failed_batch_final(content_array, server_url, **kw)
-
     resolved = [srv_normalize_translated(item) for item in translated]
-
     suspicious = [i for i, (s, t) in enumerate(zip(content_array, resolved)) if _srv_needs_retry(s, t)]
-
     if not suspicious:
-
         return resolved
-
     retried = _srv_retry_suspicious(
-
         [content_array[i] for i in suspicious], server_url,
-
         max_chars=max(300, min(9000, int(sum(len(t or "") for t in content_array) or 4500))), **kw)
-
     for i, candidate in zip(suspicious, retried):
-
         resolved[i] = srv_normalize_translated(candidate)
-
     return resolved
 
 def srv_translate_chunks(chunks, name_set, settings, update_progress_callback=None, target_lang='vi'):
-
     """Dịch qua server dichngay.com — giữ nguyên hành vi app gốc:
-
     thay name bằng placeholder → dịch theo gói → khôi phục name → chuẩn hoá."""
-
     if not chunks:
-
         return []
-
     server_url = settings.get('serverUrl') or 'https://dichngay.com/translate/text'
-
     max_chars = max(500, min(9000, int(settings.get('maxChars', 4500) or 4500)))
-
     delay_ms = settings.get('delayMs', 400)
-
     kw = dict(
-
         target_lang=target_lang or 'vi',
-
         retry_count=settings.get('retryCount', 2),
-
         retry_backoff_ms=settings.get('retryBackoffMs', 700),
-
         timeout_sec=settings.get('timeoutSec', 60),
-
     )
-
     if update_progress_callback:
-
         update_progress_callback("Chuẩn bị và thay thế tên...", 0)
-
     replacer, placeholder_map = _srv_build_name_replacer(name_set or {})
-
     texts = [replacer(srv_normalize_input(chunk)) for chunk in chunks]
-
     batches = _srv_split_batches(texts, max_chars)
-
     total_batches = len(batches)
-
     all_translated = []
-
     for i, batch in enumerate(batches):
-
         if update_progress_callback:
-
             update_progress_callback(f"Đang dịch gói {i + 1}/{total_batches}...", int((i / total_batches) * 100))
-
         all_translated.extend(_srv_translate_batch_resilient(batch, server_url, **kw))
-
         if i < total_batches - 1:
-
             _time.sleep((delay_ms or 0) / 1000.0)
-
     if len(all_translated) < len(texts):
-
         all_translated.extend(texts[len(all_translated):])
-
     elif len(all_translated) > len(texts):
-
         all_translated = all_translated[:len(texts)]
-
     if update_progress_callback:
-
         update_progress_callback("Khôi phục tên và hoàn tất...", 95)
-
     final_results = [srv_normalize_translated(_srv_restore_names(t, placeholder_map)) for t in all_translated]
-
     if update_progress_callback:
-
         update_progress_callback("Hoàn tất!", 100)
-
     return final_results
 
 # ═══════════════════════════════════════════════════════════
@@ -4739,9 +3703,9 @@ class NameTranslateDialog(tk.Toplevel):
         f1 = ttk.LabelFrame(self, text="Bộ tên đích (trong Quản lý Name)")
         f1.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
         f1.columnconfigure(0, weight=1)
-        self.combo = ttk.Combobox(f1, state="readonly", values=list(sets.keys()))
+        self.combo = ttk.Combobox(f1, state="readonly", values=_ordered_name_set_names(sets))
         active = self.tr.name_set_combo.get()
-        self.combo.set(active if active in sets else next(iter(sets)))
+        self.combo.set(active if active in sets else _ordered_name_set_names(sets)[0])
         self.combo.grid(row=0, column=0, sticky="ew", padx=(8, 6), pady=8)
         self.combo.bind("<<ComboboxSelected>>", lambda e: self._recompute())
         ttk.Button(f1, text="＋ Bộ mới…", command=self._new_set).grid(row=0, column=1, padx=(0, 8))
@@ -4860,7 +3824,10 @@ class NameTranslateDialog(tk.Toplevel):
             out, err = {}, None
             try:
                 for iid, zh in todo:
-                    hv = eng.translate_line(zh, None, settings, target="hv")
+                    # Cột "Hán Việt": nếu cụm (hoặc 1 phần cụm) đã có sẵn trong Name.json
+                    # thì lấy nghĩa đó; phần chữ nào Name.json chưa có mới ghép Hán Việt
+                    # từng chữ theo HanViet.json (xem hanviet_prefer_name).
+                    hv = eng.hanviet_prefer_name(zh)
                     vi = eng.translate_line(zh, None, settings, target="vi")
                     out[iid] = (name_capitalize_auto(hv), name_capitalize_auto(vi))
             except Exception as exc:                          # noqa: BLE001
@@ -5042,8 +4009,8 @@ class NameTranslateDialog(tk.Toplevel):
             messagebox.showerror("Lỗi", "Tên bộ đã tồn tại.", parent=self)
             return
         sets[name] = {}
-        self.tr.name_set_combo["values"] = list(sets.keys())
-        self.combo["values"] = list(sets.keys())
+        self.tr.name_set_combo["values"] = _ordered_name_set_names(sets)
+        self.combo["values"] = _ordered_name_set_names(sets)
         self.combo.set(name)
         self.tr.save_config()
         self._recompute()
@@ -5142,23 +4109,15 @@ class TabTranslate(ttk.Frame):
     """Tab dịch thuật + quản lý name-set (dựa trên translate_tab_mixin.py)."""
 
     def __init__(self, parent):
-
         super().__init__(parent)
-
         self.app_config = trans_load_config()
-
         self.engine = ZhViTranslator()
-
         self.is_translating = False
-
         self._last_translation_lang = "vi"
-
         self._build()
-
         self._load_dicts_async()
 
     # ── cấu hình ──────────────────────────────────────────
-
     def save_config(self):
         try:
             trans_save_config(self.app_config)
@@ -5175,121 +4134,69 @@ class TabTranslate(ttk.Frame):
             )
 
     def _settings(self):
-
         return self.app_config["translator_settings"]
 
     def _collect_runtime_settings(self):
-
         s = self._settings()
-
         s["nameUrl"] = self.adv_name_url.get().strip()
-
         s["vpUrl"] = self.adv_vp_url.get().strip()
-
         s["hvUrl"] = self.adv_hv_url.get().strip()
-
         try:
-
             s["maxMatchLen"] = int(self.adv_max_match.get())
-
         except Exception:
-
             s["maxMatchLen"] = TRANS_DEFAULT_SETTINGS["maxMatchLen"]
-
         s["priorityNameFirst"] = bool(self.adv_prio_name.get())
-
         if hasattr(self, "adv_server_url"):
-
             s["serverUrl"] = self.adv_server_url.get().strip()
-
             try:
-
                 s["delayMs"] = int(self.adv_delay.get())
-
             except Exception:
-
                 s["delayMs"] = TRANS_DEFAULT_SETTINGS["delayMs"]
-
             try:
-
                 s["maxChars"] = int(self.adv_max_chars.get())
-
             except Exception:
-
                 s["maxChars"] = TRANS_DEFAULT_SETTINGS["maxChars"]
-
         self.save_config()
-
         return dict(s)
 
     def _active_name_set(self):
-
         set_name = self.name_set_combo.get()
-
         return dict(self.app_config.get("nameSets", {}).get(set_name, {}) or {})
 
     # ── UI ────────────────────────────────────────────────
-
     def _build(self):
-
         self.rowconfigure(0, weight=1)
-
         self.columnconfigure(0, weight=1)
-
         main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-
         main_paned.grid(row=0, column=0, sticky="nsew", padx=6, pady=(6, 0))
-
         left_frame = ttk.Frame(main_paned)
-
         main_paned.add(left_frame, weight=1)
-
         left_frame.rowconfigure(0, weight=1)
-
         left_frame.columnconfigure(0, weight=1)
-
         left_nb = ttk.Notebook(left_frame)
-
         left_nb.grid(row=0, column=0, sticky="nsew")
-
         self.left_nb = left_nb
-
         input_tab = ttk.Frame(left_nb, padding=5)
-
         left_nb.add(input_tab, text="Dịch QT")
-
         input_tab.rowconfigure(0, weight=1)
-
         input_tab.columnconfigure(0, weight=1)
-        
 
         self.input_text = tk.Text(input_tab, wrap=tk.WORD, font=("Segoe UI", 11), undo=True, foreground="#1a1a1a")
-
         self.input_text.grid(row=0, column=0, sticky="nsew")
-
         self.input_text.bind("<Button-3>", self._show_input_context_menu)
 
         name_tab = ttk.Frame(left_nb, padding=8)
-
         left_nb.add(name_tab, text="Quản lý Name")
-
         self._build_name_manager(name_tab)
 
         adv_tab = ttk.Frame(left_nb, padding=8)
-
         left_nb.add(adv_tab, text="Nâng cao")
-
         self._build_advanced(adv_tab)
 
-
         right_frame = ttk.LabelFrame(main_paned, text="Kết quả dịch", padding=6)
-
         main_paned.add(right_frame, weight=1)
-
         right_frame.rowconfigure(0, weight=1)
-
         right_frame.columnconfigure(0, weight=1)
-
         self.output_text = scrolledtext.ScrolledText(
             right_frame, 
             wrap=tk.WORD, 
@@ -5299,175 +4206,116 @@ class TabTranslate(ttk.Frame):
             foreground="#1a1a1a",  # ← Thêm màu chữ tối hơn
             insertbackground="#0066cc"
         )
-
         self.output_text.grid(row=0, column=0, sticky="nsew")
-
         self.output_text.chunk_data = {}
-
         self.output_text.bind("<Button-3>", self._show_output_context_menu)
 
         ctrl = ttk.Frame(self, padding=(6, 8))
-
         ctrl.grid(row=1, column=0, sticky="ew")
-
         ctrl.columnconfigure(3, weight=1)
-
         ttk.Button(ctrl, text="📂 Tải file...", command=self._load_file).grid(row=0, column=0)
-
         ttk.Button(ctrl, text="📋 Dán", command=self._paste_input).grid(row=0, column=1, padx=4)
-
         ttk.Button(ctrl, style="Pink.TButton", text="🗑 Xóa hết", command=self._clear_active_input).grid(row=0, column=2)
-
         self.progress_bar = ttk.Progressbar(ctrl, orient="horizontal", mode="determinate")
-
         self.progress_bar.grid(row=0, column=3, sticky="ew", padx=10)
-
         self.progress_bar.grid_remove()
-
         ttk.Button(ctrl, text="▶ Việt (offline)", style="Accent.TButton", command=lambda: self._start_translation("vi")).grid(row=0, column=4, padx=(0, 4))
-
         ttk.Button(ctrl, text="☁ Việt (server)", command=lambda: self._start_translation("vi-server")).grid(row=0, column=5, padx=(0, 4))
-
         ttk.Button(ctrl, text="▶ Hán Việt", command=lambda: self._start_translation("hv")).grid(row=0, column=6, padx=(0, 4))
-
         ttk.Button(ctrl, text="📋 Sao chép", command=self._copy_result).grid(row=0, column=7, padx=(0, 4))
-
         ttk.Button(ctrl, text="💾 Xuất kết quả...", command=self._export_result).grid(row=0, column=8, padx=(0, 8))
-
         self.status_label = ttk.Label(ctrl, text="Đang khởi động...", foreground="#555")
-
         self.status_label.grid(row=0, column=9, sticky="e")
 
     # ── nạp / tải từ điển ─────────────────────────────────
-
     def _set_status(self, msg):
-
         self.after(0, lambda: self.status_label.config(text=msg))
 
     def _load_dicts_async(self, force_download=False):
-
         def worker():
-
             try:
-
                 os.makedirs(TRANS_DICT_DIR, exist_ok=True)
-
+                version_path = os.path.join(TRANS_DICT_DIR, "remote_versions.json")
+                try:
+                    with open(version_path, "r", encoding="utf-8") as version_file:
+                        remote_versions = json.load(version_file)
+                except (OSError, ValueError):
+                    remote_versions = {}
                 s = self._settings()
-
                 files = [("Name.json", s.get("nameUrl")), ("VP.json", s.get("vpUrl")), ("HanViet.json", s.get("hvUrl"))]
-
                 for fname, url in files:
-
                     path = os.path.join(TRANS_DICT_DIR, fname)
-
-                    if (force_download or not os.path.exists(path)) and url:
-
+                    remote_tag = _trans_remote_tag(url) if url else None
+                    should_download = force_download or not os.path.exists(path)
+                    if remote_tag and remote_versions.get(fname) != remote_tag:
+                        should_download = True
+                    if should_download and url:
                         self._set_status(f"Đang tải {fname}...")
-
                         try:
-
-                            _trans_download(url, path)
-
+                            temp_path = path + ".download"
+                            _trans_download(url, temp_path)
+                            os.replace(temp_path, path)
+                            if remote_tag:
+                                remote_versions[fname] = remote_tag
                         except Exception as e:
-
                             self._set_status(f"Không tải được {fname}: {e}")
+                version_tmp = version_path + ".tmp"
+                with open(version_tmp, "w", encoding="utf-8") as version_file:
+                    json.dump(remote_versions, version_file)
+                os.replace(version_tmp, version_path)
 
                 self._set_status("Đang nạp từ điển...")
-
                 self.engine.load(
-
                     os.path.join(TRANS_DICT_DIR, "Name.json"),
-
                     os.path.join(TRANS_DICT_DIR, "VP.json"),
-
                     os.path.join(TRANS_DICT_DIR, "HanViet.json"),
-
+                    overlays=getattr(self.winfo_toplevel(), "admin_datasets", {}),
                 )
-
                 missing = [f for f in ("Name.json", "VP.json", "HanViet.json")
-
                            if not os.path.exists(os.path.join(TRANS_DICT_DIR, f))]
-
                 msg = f"Sẵn sàng. {self.engine.stats()}"
-
                 if missing:
-
                     msg += f"  (thiếu: {', '.join(missing)})"
-
                 self._set_status(msg)
-
                 self.after(0, self._refresh_dict_stats)
 
                 if missing and not getattr(self, "_warned_missing_dict", False):
-
                     self._warned_missing_dict = True
 
                     def warn():
-
                         messagebox.showwarning(
-
                             "Thiếu từ điển",
-
                             f"Chưa có file: {', '.join(missing)}\n\n"
-
                             "Đặc biệt VP.json (VietPhrase) là từ điển cụm từ chính — "
-
                             "thiếu nó thì nút 'Việt' chỉ cho kết quả như Hán Việt.\n\n"
-
                             f"Cách khắc phục:\n"
-
                             f"  1. Chép file vào thư mục:\n      {TRANS_DICT_DIR}\n"
-
                             "  2. Hoặc vào tab 'Nâng cao' → '⬇ Tải lại từ điển từ web'\n"
-
                             "  3. Rồi bấm '🔄 Nạp lại từ điển'.",
-
                             parent=self)
-
                     self.after(0, warn)
-
             except Exception as e:
-
                 self._set_status(f"Lỗi nạp từ điển: {e}")
-
         threading.Thread(target=worker, daemon=True).start()
 
     # ── thao tác input/output ─────────────────────────────
-
     def _load_file(self):
-
         path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
-
         if not path:
-
             return
-
         content = None
-
         for enc in ["utf-8", "utf-8-sig", "gb18030", "gbk"]:
-
             try:
-
                 with open(path, "r", encoding=enc) as f:
-
                     content = f.read()
-
                 break
-
             except Exception:
-
                 content = None
-
         if content is None:
-
             with open(path, "r", encoding="utf-8", errors="replace") as f:
-
                 content = f.read()
-
         self.input_text.delete("1.0", tk.END)
-
         self.input_text.insert("1.0", content)
-
         self.status_label.config(text=f"Đã mở: {os.path.basename(path)}")
 
     def _active_input_widget(self):
@@ -5494,247 +4342,135 @@ class TabTranslate(ttk.Frame):
         w.insert("1.0", clip)
 
     def _copy_result(self):
-
         content = self.output_text.get("1.0", "end-1c")
-
         if not content.strip():
-
             messagebox.showinfo("Trống", "Chưa có kết quả dịch.", parent=self)
-
             return
-
         self.clipboard_clear()
-
         self.clipboard_append(content)
-
         self.status_label.config(text="Đã sao chép kết quả.")
 
     def _export_result(self):
-
         content = self.output_text.get("1.0", tk.END).strip()
-
         if not content:
-
             messagebox.showinfo("Thông báo", "Chưa có nội dung dịch để xuất.", parent=self)
-
             return
-
         path = filedialog.asksaveasfilename(
-
             title="Xuất kết quả dịch", defaultextension=".txt",
-
             filetypes=[("Text file", "*.txt"), ("JSON (list)", "*.json"), ("All files", "*.*")],
-
         )
-
         if not path:
-
             return
-
         try:
-
             if path.lower().endswith(".json"):
-
                 with open(path, "w", encoding="utf-8") as f:
-
                     json.dump(content.split("\n"), f, ensure_ascii=False, indent=2)
-
             else:
-
                 with open(path, "w", encoding="utf-8") as f:
-
                     f.write(content)
-
             messagebox.showinfo("Thành công", f"Đã xuất kết quả: {path}", parent=self)
-
         except Exception as e:
-
             messagebox.showerror("Lỗi", f"Không thể lưu file: {e}", parent=self)
 
     def _set_output_chunks(self, original_chunks, translated_chunks, spans_list=None):
-
         w = self.output_text
-
         w.config(state="normal")
-
         w.delete("1.0", tk.END)
-
         w.chunk_data = {}
-
         w.chunk_spans = {}
-
         for i, tr in enumerate(translated_chunks):
-
             tag = f"chunk_{i}"
-
             w.chunk_data[tag] = original_chunks[i] if i < len(original_chunks) else ""
-
             w.chunk_spans[tag] = spans_list[i] if spans_list and i < len(spans_list) else []
-
             w.insert(tk.END, tr + "\n", (tag,))
-
         w.config(state="disabled")
 
     # ── dịch ──────────────────────────────────────────────
-
     def _start_translation(self, target_lang="vi"):
-
         content = self.input_text.get("1.0", tk.END).strip()
-
         if not content:
-
             messagebox.showwarning("Cảnh báo", "Không có nội dung để dịch.", parent=self)
-
             return
-
         if target_lang != "vi-server" and not self.engine.ready:
-
             messagebox.showwarning("Chưa sẵn sàng", "Từ điển chưa nạp xong, vui lòng đợi.", parent=self)
-
             return
-
         if self.is_translating:
-
             return
-
         self.is_translating = True
-
         settings = self._collect_runtime_settings()
-
         name_set = self._active_name_set()
-
         threading.Thread(target=self._translation_worker,
-
                          args=(content, name_set, settings, target_lang), daemon=True).start()
 
     def _translation_worker(self, content, name_set, settings, target_lang):
-
         def progress(msg, val):
-
             self.after(0, lambda: [self.status_label.config(text=msg),
-
                                    self.progress_bar.config(value=val),
-
                                    self.progress_bar.grid()])
-
         try:
-
             chunks = content.split("\n")
-
             if target_lang == "vi-server":
-
                 translated = srv_translate_chunks(chunks, name_set, settings, progress, target_lang="vi")
-
                 spans_list = None
-
             else:
-
                 translated, spans_list = self.engine.translate_chunks(
-
                     chunks, name_set, settings, progress, target=target_lang, with_spans=True)
 
             def done():
-
                 self._set_output_chunks(chunks, translated, spans_list)
-
                 self._last_translation_lang = target_lang
-
                 self.progress_bar.grid_remove()
-
                 self.status_label.config(text=f"Dịch xong {len(chunks):,} dòng.")
-
             self.after(0, done)
-
         except Exception as e:
-
             self._set_status(f"Lỗi dịch: {e}")
-
         finally:
-
             self.is_translating = False
 
     def _smart_retranslate(self, affected_keys):
-
         """Dịch lại các dòng bị ảnh hưởng khi name thay đổi."""
-
         w = self.output_text
-
         if not getattr(w, "chunk_data", None):
-
             return
-
         if self._last_translation_lang != "vi-server" and not self.engine.ready:
-
             return
-
         chunks_to_do, update_plan = [], {}
-
         for tag, original in w.chunk_data.items():
-
             if any(k in original for k in affected_keys):
-
                 update_plan[len(chunks_to_do)] = tag
-
                 chunks_to_do.append(original)
-
         if not chunks_to_do:
-
             return
 
         def worker():
-
             self._set_status(f"Đang cập nhật {len(chunks_to_do)} đoạn...")
-
             name_set = self._active_name_set()
-
             settings = dict(self._settings())
-
             if self._last_translation_lang == "vi-server":
-
                 new_texts = srv_translate_chunks(chunks_to_do, name_set, settings, target_lang="vi")
-
                 new_spans = None
-
             else:
-
                 new_texts, new_spans = self.engine.translate_chunks(
-
                     chunks_to_do, name_set, settings,
-
                     target=self._last_translation_lang, with_spans=True)
 
             def update_ui():
-
                 w.config(state="normal")
-
                 for i, new_text in enumerate(new_texts):
-
                     tag = update_plan.get(i)
-
                     if tag:
-
                         rng = w.tag_ranges(tag)
-
                         if rng:
-
                             w.delete(rng[0], rng[1])
-
                             w.insert(rng[0], new_text + "\n", (tag,))
-
                         if hasattr(w, "chunk_spans"):
-
                             w.chunk_spans[tag] = new_spans[i] if new_spans else []
-
                 w.config(state="disabled")
-
                 self.status_label.config(text="Cập nhật hoàn tất.")
-
             self.after(0, update_ui)
-
         threading.Thread(target=worker, daemon=True).start()
 
     # ── menu chuột phải trên văn bản gốc ──────────────────
-
     def _input_sel_to_vi(self):
         """Bôi đen ở input → (zh, vi bên output nếu có)."""
         try:
@@ -5856,414 +4592,231 @@ class TabTranslate(ttk.Frame):
         menu.tk_popup(event.x_root, event.y_root)
 
     def _quick_save_name(self, zh, vi):
-
         zh, vi = (zh or "").strip(), (vi or "").strip()
-
         if not zh or not vi:
-
             return
-
         set_name = self.name_set_combo.get()
-
         self.app_config["nameSets"][set_name][zh] = vi
-
         self.save_config()
-
         self._refresh_name_list()
-
         self.status_label.config(text=f"Đã lưu name: {zh} = {vi}")
-
         self._smart_retranslate([zh])
 
     # ── menu chuột phải trên kết quả ──────────────────────
-
     def _selection_to_zh(self, w):
-
         """Từ đoạn Việt đang bôi đen trong output, suy ra cụm chữ Trung gốc.
 
         Trả về (zh, sel_text) hoặc (None, sel_text)."""
-
         try:
-
             sel_first, sel_last = w.index("sel.first"), w.index("sel.last")
-
         except tk.TclError:
-
             return None, ""
-
         sel_text = w.get(sel_first, sel_last).strip()
-
         if not sel_text:
-
             return None, ""
-
         tags = [t for t in w.tag_names(sel_first) if t.startswith("chunk_")]
-
         if not tags:
-
             return None, sel_text
-
         chunk_tag = tags[0]
-
         rng = w.tag_ranges(chunk_tag)
-
         spans = getattr(w, "chunk_spans", {}).get(chunk_tag) or []
-
         if not rng or not spans:
-
             return None, sel_text
-
         off1 = len(w.get(rng[0], sel_first))
-
         off2 = off1 + len(w.get(sel_first, sel_last))
-
         zh = "".join(s[0] for s in spans if s[3] > off1 and s[2] < off2).strip()
-
         return (zh or None), sel_text
 
     def _build_name_manager(self, parent):
-
         parent.columnconfigure(0, weight=1)
-
         parent.rowconfigure(3, weight=1)
 
         sel = ttk.Frame(parent)
-
         sel.grid(row=0, column=0, sticky="ew")
-
         ttk.Label(sel, text="Bộ tên:").pack(side=tk.LEFT)
-
         self.name_set_combo = ttk.Combobox(sel, state="readonly",
-
-                                           values=list(self.app_config["nameSets"].keys()))
-
+                                           values=_ordered_name_set_names(self.app_config["nameSets"]))
         self.name_set_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
         active = self.app_config.get("activeNameSet", "")
-
         if active not in self.app_config["nameSets"]:
-
-            active = list(self.app_config["nameSets"].keys())[0]
-
+            active = _ordered_name_set_names(self.app_config["nameSets"])[0]
         self.name_set_combo.set(active)
-
         self.name_set_combo.bind("<<ComboboxSelected>>", self._on_set_changed)
-
         ttk.Button(sel, text="Tạo mới", command=self._create_new_set).pack(side=tk.LEFT)
-
         ttk.Button(sel, style="Pink.TButton", text="Xóa bộ", command=self._delete_current_set).pack(side=tk.LEFT, padx=(5, 0))
 
         tools = ttk.Frame(parent)
-
         tools.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
         ttk.Button(tools, text="Nhập từ file", command=self._import_names).pack(side=tk.LEFT)
-
         ttk.Button(tools, text="Xuất ra TXT", command=self._export_names_txt).pack(side=tk.LEFT, padx=5)
-
         ttk.Button(tools, style="Pink.TButton", text="Xóa hết name", command=self._clear_names).pack(side=tk.LEFT)
 
         quick = ttk.LabelFrame(parent, text="Thêm/Sửa nhanh (mỗi dòng: Trung=Việt)")
-
         quick.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-
         quick.columnconfigure(0, weight=1)
-
         self.quick_add_text = scrolledtext.ScrolledText(quick, height=4, wrap=tk.WORD, undo=True)
-
         self.quick_add_text.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
-
         ttk.Button(quick, text="Thêm/Cập nhật các cặp này", style="Accent.TButton", command=self._quick_add_names).grid(row=1, column=0, pady=(0, 6))
 
         lf = ttk.LabelFrame(parent, text="Danh sách name")
-
         lf.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
-
         lf.rowconfigure(1, weight=1)
-
         lf.columnconfigure(0, weight=1)
-
         search_fr = ttk.Frame(lf)
-
         search_fr.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(4, 0))
-
         ttk.Label(search_fr, text="Tìm:").pack(side=tk.LEFT)
-
         self.name_search_var = tk.StringVar()
-
         self.name_search_var.trace_add("write", lambda *a: self._refresh_name_list())
-
         ttk.Entry(search_fr, textvariable=self.name_search_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
         ttk.Button(search_fr, text="➕ Thêm", command=lambda: self._edit_name("", "")).pack(side=tk.LEFT)
-
         ttk.Button(search_fr, text="✏ Sửa", command=self._edit_selected_name).pack(side=tk.LEFT, padx=4)
-
         ttk.Button(search_fr, style="Pink.TButton", text="🗑 Xóa", command=self._delete_selected_names).pack(side=tk.LEFT)
 
         self.name_tree = ttk.Treeview(lf, columns=("zh", "vi"), show="headings", selectmode="extended")
-
         self.name_tree.heading("zh", text="Tiếng Trung")
-
         self.name_tree.heading("vi", text="Tiếng Việt")
-
         self.name_tree.column("zh", width=140)
-
         self.name_tree.column("vi", width=180)
-
         self.name_tree.grid(row=1, column=0, sticky="nsew", padx=(4, 0), pady=4)
-
         tsb = ttk.Scrollbar(lf, orient=tk.VERTICAL, command=self.name_tree.yview)
-
         tsb.grid(row=1, column=1, sticky="ns", pady=4)
-
         self.name_tree.configure(yscrollcommand=tsb.set)
-
         self.name_tree.bind("<Double-1>", lambda e: self._edit_selected_name())
-
         self.name_tree.bind("<Delete>", lambda e: self._delete_selected_names())
-
         self._refresh_name_list()
 
     def _on_set_changed(self, event=None):
-
         self.app_config["activeNameSet"] = self.name_set_combo.get()
-
         self.save_config()
-
         self._refresh_name_list()
 
     def _refresh_name_list(self):
-
         tree = self.name_tree
-
         tree.delete(*tree.get_children())
-
         current = self.app_config["nameSets"].get(self.name_set_combo.get(), {})
-
         q = (self.name_search_var.get() or "").strip().lower()
-
         for k in sorted(current.keys()):
-
             v = current[k]
-
             if q and q not in k.lower() and q not in str(v).lower():
-
                 continue
-
             tree.insert("", tk.END, values=(k, v))
 
     def _quick_add_names(self):
-
         lines = self.quick_add_text.get("1.0", tk.END).strip().split("\n")
-
         set_name = self.name_set_combo.get()
-
         if not set_name:
-
             return
-
         count, added_keys = 0, []
-
         for line in lines:
-
             parts = line.split("=")
-
             if len(parts) == 2:
-
                 ch, vi = parts[0].strip(), parts[1].strip()
-
                 if ch and vi:
-
                     self.app_config["nameSets"][set_name][ch] = vi
-
                     added_keys.append(ch)
-
                     count += 1
-
         if count:
-
             self.save_config()
-
             self.quick_add_text.delete("1.0", tk.END)
-
             self._refresh_name_list()
-
             self.status_label.config(text=f"Đã thêm/cập nhật {count} tên.")
-
             self._smart_retranslate(added_keys)
 
     def _create_new_set(self):
-
         name = simpledialog.askstring("Tạo bộ mới", "Nhập tên cho bộ mới:", parent=self)
-
         if name and name not in self.app_config["nameSets"]:
-
             self.app_config["nameSets"][name] = {}
-
-            self.name_set_combo["values"] = list(self.app_config["nameSets"].keys())
-
+            self.name_set_combo["values"] = _ordered_name_set_names(self.app_config["nameSets"])
             self.name_set_combo.set(name)
-
             self._on_set_changed()
-
         elif name:
-
             messagebox.showerror("Lỗi", "Tên bộ đã tồn tại.", parent=self)
 
     def _delete_current_set(self):
-
         set_name = self.name_set_combo.get()
-
         if len(self.app_config["nameSets"]) <= 1:
-
             messagebox.showerror("Lỗi", "Không thể xóa bộ tên cuối cùng.", parent=self)
-
             return
-
         if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn xóa bộ '{set_name}'?", parent=self):
-
             del self.app_config["nameSets"][set_name]
-
-            self.name_set_combo["values"] = list(self.app_config["nameSets"].keys())
-
-            self.name_set_combo.set(list(self.app_config["nameSets"].keys())[0])
-
+            ordered_names = _ordered_name_set_names(self.app_config["nameSets"])
+            self.name_set_combo["values"] = ordered_names
+            self.name_set_combo.set(ordered_names[0])
             self._on_set_changed()
 
     def _import_names(self):
-
         path = filedialog.askopenfilename(filetypes=[("Text & JSON", "*.txt *.json"), ("All files", "*.*")], parent=self)
-
         if not path:
-
             return
-
         try:
-
             with open(path, "r", encoding="utf-8") as f:
-
                 content = f.read()
-
             new_names = {}
-
             if path.lower().endswith(".json"):
-
                 raw = json.loads(content)
-
                 for k, v in raw.items():
-
                     if isinstance(v, dict):
-
                         v = v.get("val", "")
-
                     if k and str(v).strip():
-
                         new_names[k] = str(v).strip()
-
             else:
-
                 for line in content.split("\n"):
-
                     parts = line.split("=")
-
                     if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-
                         new_names[parts[0].strip()] = parts[1].strip()
-
             set_name = self.name_set_combo.get()
-
             self.app_config["nameSets"][set_name].update(new_names)
-
             self.save_config()
-
             self._refresh_name_list()
-
             messagebox.showinfo("Thành công", f"Đã nhập và cập nhật {len(new_names)} tên.", parent=self)
-
         except Exception as e:
-
             messagebox.showerror("Lỗi", f"Không thể đọc file: {e}", parent=self)
 
     def _export_names_txt(self):
-
         set_name = self.name_set_combo.get()
-
         current = self.app_config["nameSets"].get(set_name, {})
-
         path = filedialog.asksaveasfilename(defaultextension=".txt", initialfile=f"{set_name}.txt",
-
                                             filetypes=[("Text files", "*.txt")], parent=self)
-
         if not path:
-
             return
-
         try:
-
             with open(path, "w", encoding="utf-8") as f:
-
                 f.write("\n".join(f"{k}={v}" for k, v in current.items()))
-
             messagebox.showinfo("Thành công", "Đã xuất file thành công.", parent=self)
-
         except Exception as e:
-
             messagebox.showerror("Lỗi", f"Không thể lưu file: {e}", parent=self)
 
     def _clear_names(self):
-
         set_name = self.name_set_combo.get()
-
         if messagebox.askyesno("Xác nhận", f"Xóa TẤT CẢ name trong bộ '{set_name}'?", icon="warning", parent=self):
-
             self.app_config["nameSets"][set_name] = {}
-
             self.save_config()
-
             self._refresh_name_list()
 
     def _edit_selected_name(self):
-
         sel = self.name_tree.selection()
-
         if not sel:
-
             messagebox.showinfo("Thông báo", "Chọn một name trong danh sách trước.", parent=self)
-
             return
-
         k, v = self.name_tree.item(sel[0], "values")
-
         self._edit_name(k, v)
 
     def _delete_selected_names(self):
-
         sel = self.name_tree.selection()
-
         if not sel:
-
             return
-
         set_name = self.name_set_combo.get()
-
         keys = [self.name_tree.item(i, "values")[0] for i in sel]
-
         if messagebox.askyesno("Xác nhận", f"Xóa {len(keys)} name đã chọn?", parent=self):
-
             for k in keys:
-
                 self.app_config["nameSets"][set_name].pop(k, None)
-
             self.save_config()
-
             self._refresh_name_list()
 
     # ── dialog thêm/sửa name + gợi ý ──────────────────────
-
     def _edit_name(self, key, current_viet="", original_zh="", translated_vi=""):
         """Dialog thêm/sửa name với preview tiếng Trung + Việt gốc.
-        
+
         original_zh: chữ Trung gốc (từ input khi người dùng bôi đen)
         translated_vi: bản dịch Việt tương ứng (từ output)
         """
@@ -6272,37 +4825,37 @@ class TabTranslate(ttk.Frame):
         win.title("Thêm / Sửa Name")
         win.geometry("560x240")
         win.resizable(False, False)
-        
+
         fr = ttk.Frame(win, padding=15)
         fr.pack(fill=tk.BOTH, expand=True)
         fr.columnconfigure(1, weight=1)
-        
+
         # ═══ Preview ═══
         if original_zh or translated_vi:
             preview_lf = ttk.LabelFrame(fr, text="📌 Context gốc (không sửa)")
             preview_lf.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
             preview_lf.columnconfigure(1, weight=1)
-            
+
             if original_zh:
                 ttk.Label(preview_lf, text="Tiếng Trung:", font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w", padx=4, pady=3)
                 ttk.Label(preview_lf, text=original_zh, foreground="#0066cc", 
                         font=FONT_BOLD).grid(row=0, column=1, sticky="w", padx=4, pady=3)
-            
+
             if translated_vi:
                 ttk.Label(preview_lf, text="Tiếng Việt:", font=("Segoe UI", 9)).grid(row=1, column=0, sticky="w", padx=4, pady=3)
                 ttk.Label(preview_lf, text=translated_vi, foreground="#009933", 
                         font=FONT_BOLD).grid(row=1, column=1, sticky="w", padx=4, pady=3)
-            
+
             row_offset = 1
         else:
             row_offset = 0
-        
+
         # ═══ Input ═══
         ttk.Label(fr, text="Tiếng Trung:", font=("Segoe UI", 10, "bold")).grid(row=row_offset, column=0, sticky="w", pady=4)
         key_entry = ttk.Entry(fr, font=FONT_TEXT)
         key_entry.insert(0, key)
         key_entry.grid(row=row_offset, column=1, sticky="ew", pady=4)
-        
+
         ttk.Label(fr, text="Tiếng Việt:", font=("Segoe UI", 10, "bold")).grid(row=row_offset+1, column=0, sticky="w", pady=4)
         viet_entry = ttk.Entry(fr, font=FONT_TEXT)
         set_name = self.name_set_combo.get()
@@ -6311,11 +4864,11 @@ class TabTranslate(ttk.Frame):
         viet_entry.grid(row=row_offset+1, column=1, sticky="ew", pady=4)
         viet_entry.focus_set()
         viet_entry.selection_range(0, len(initial))
-        
+
         # ═══ Buttons ═══
         btns = ttk.Frame(fr)
         btns.grid(row=row_offset+2, column=0, columnspan=2, pady=(15, 0), sticky="e")
-        
+
         def on_save():
             new_key = key_entry.get().strip()
             new_viet = viet_entry.get().strip()
@@ -6330,7 +4883,7 @@ class TabTranslate(ttk.Frame):
             self._refresh_name_list()
             win.destroy()
             self._smart_retranslate([new_key])
-        
+
         def on_delete():
             k = key_entry.get().strip()
             if not k:
@@ -6341,7 +4894,7 @@ class TabTranslate(ttk.Frame):
                 self.save_config()
                 self._refresh_name_list()
                 win.destroy()
-        
+
         suggest_btn = ttk.Button(
             btns, text="Gợi ý...",
             command=lambda: self._show_suggestion_window(
@@ -6353,7 +4906,7 @@ class TabTranslate(ttk.Frame):
         save_btn = ttk.Button(btns, text="Lưu", style="Accent.TButton", command=on_save)
         update_btn = ttk.Button(btns, text="Sửa", style="Accent.TButton", command=on_save)
         delete_btn = ttk.Button(btns, style="Pink.TButton", text="Xóa", command=on_delete)
-        
+
         def update_buttons(event=None):
             cur = key_entry.get().strip()
             sname = self.name_set_combo.get()
@@ -6366,192 +4919,114 @@ class TabTranslate(ttk.Frame):
                 delete_btn.grid(row=0, column=3, padx=5)
             else:
                 save_btn.grid(row=0, column=2, padx=5)
-        
+
         suggest_btn.grid(row=0, column=0)
         cancel_btn.grid(row=0, column=1, padx=5)
         key_entry.bind("<KeyRelease>", update_buttons)
         update_buttons()
 
     def _show_suggestion_window(self, key, on_select):
-
         if not key:
-
             return
-
         win = tk.Toplevel(self)
-
         win.title(f"Gợi ý cho '{key}'")
-
         win.geometry("640x420")
-
         paned = ttk.PanedWindow(win, orient=tk.HORIZONTAL)
-
         paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         hv_lf = ttk.LabelFrame(paned, text="Hán-Việt")
-
         paned.add(hv_lf, weight=1)
-
         hv_txt = scrolledtext.ScrolledText(hv_lf, wrap=tk.WORD, state="disabled")
-
         hv_txt.pack(fill=tk.BOTH, expand=True)
 
         tr_lf = ttk.LabelFrame(paned, text="Gợi ý dịch")
-
         paned.add(tr_lf, weight=1)
-
         tr_txt = scrolledtext.ScrolledText(tr_lf, wrap=tk.WORD, state="disabled")
-
         tr_txt.pack(fill=tk.BOTH, expand=True)
 
         def pick(value):
-
             on_select(value)
-
             win.destroy()
 
         def add_link(widget, text):
-
             widget.config(state="normal")
-
             tag = f"link_{widget.index(tk.END)}"
-
             widget.insert(tk.END, text + "\n", (tag,))
-
             widget.tag_config(tag, foreground="blue", underline=True, spacing1=3, spacing3=3)
-
             widget.tag_bind(tag, "<Enter>", lambda e: widget.config(cursor="hand2"))
-
             widget.tag_bind(tag, "<Leave>", lambda e: widget.config(cursor=""))
-
             widget.tag_bind(tag, "<Button-1>", lambda e, t=text: pick(t))
-
             widget.config(state="disabled")
 
         def worker():
-
             hv_lines, tr_lines = [], []
-
             if self.engine.ready:
-
                 hv_lines = trans_progressive_capitalizations(self.engine.hanviet_of(key))
-
                 seen = []
-
                 for sug in self.engine.suggest(key, limit=15):
-
                     for alt in (sug.get("alts") or [sug.get("val", "")]):
-
                         for line in trans_progressive_capitalizations(alt):
-
                             if line and line not in seen:
-
                                 seen.append(line)
-
                 tr_lines = seen[:60]
 
             def update_ui():
-
                 if not win.winfo_exists():
-
                     return
-
                 for line in hv_lines:
-
                     add_link(hv_txt, line)
-
                 for line in tr_lines:
-
                     add_link(tr_txt, line)
-
             self.after(0, update_ui)
-
         threading.Thread(target=worker, daemon=True).start()
 
     # ── tab nâng cao ──────────────────────────────────────
-
     def _build_advanced(self, parent):
-
         parent.columnconfigure(1, weight=1)
-
         s = self._settings()
-
         self.adv_name_url = tk.StringVar(value=s.get("nameUrl", ""))
-
         self.adv_vp_url = tk.StringVar(value=s.get("vpUrl", ""))
-
         self.adv_hv_url = tk.StringVar(value=s.get("hvUrl", ""))
-
         self.adv_max_match = tk.IntVar(value=s.get("maxMatchLen", 30))
-
         self.adv_prio_name = tk.BooleanVar(value=s.get("priorityNameFirst", True))
-
         self.adv_server_url = tk.StringVar(value=s.get("serverUrl", ""))
-
         self.adv_delay = tk.IntVar(value=s.get("delayMs", 400))
-
         self.adv_max_chars = tk.IntVar(value=s.get("maxChars", 4500))
 
         ttk.Label(parent, text="URL Name.json:").grid(row=0, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Entry(parent, textvariable=self.adv_name_url).grid(row=0, column=1, sticky="ew", padx=5)
-
         ttk.Label(parent, text="URL VP.json:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Entry(parent, textvariable=self.adv_vp_url).grid(row=1, column=1, sticky="ew", padx=5)
-
         ttk.Label(parent, text="URL HanViet.json:").grid(row=2, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Entry(parent, textvariable=self.adv_hv_url).grid(row=2, column=1, sticky="ew", padx=5)
-
         ttk.Label(parent, text="Độ dài khớp tối đa:").grid(row=3, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Spinbox(parent, from_=2, to=200, textvariable=self.adv_max_match, width=8).grid(row=3, column=1, sticky="w", padx=5)
-
         ttk.Checkbutton(parent, text="Ưu tiên Name khi trùng với VP",
-
                         variable=self.adv_prio_name).grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=4)
 
         ttk.Separator(parent, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", padx=5, pady=6)
-
         ttk.Label(parent, text="URL Server dịch:").grid(row=6, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Entry(parent, textvariable=self.adv_server_url).grid(row=6, column=1, sticky="ew", padx=5)
-
         ttk.Label(parent, text="Delay giữa các gói (ms):").grid(row=7, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Entry(parent, textvariable=self.adv_delay, width=10).grid(row=7, column=1, sticky="w", padx=5)
-
         ttk.Label(parent, text="Số ký tự tối đa / gói:").grid(row=8, column=0, sticky="w", padx=5, pady=4)
-
         ttk.Entry(parent, textvariable=self.adv_max_chars, width=10).grid(row=8, column=1, sticky="w", padx=5)
 
         btn_fr = ttk.Frame(parent)
-
         btn_fr.grid(row=9, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 4))
-
         ttk.Button(btn_fr, text="🔄 Nạp lại từ điển",
-
                    command=lambda: (self._collect_runtime_settings(), self._load_dicts_async())).pack(side=tk.LEFT)
-
         ttk.Button(btn_fr, text="⬇ Tải lại từ điển từ web",
-
                    command=self._force_redownload).pack(side=tk.LEFT, padx=8)
 
         self.dict_stats_label = ttk.Label(parent, text="Từ điển: chưa nạp.", foreground="#555")
-
         self.dict_stats_label.grid(row=10, column=0, columnspan=2, sticky="w", padx=5, pady=(10, 2))
-
         ttk.Label(parent, text=f"Thư mục từ điển: {TRANS_DICT_DIR}",
-
                   foreground="#888", wraplength=420).grid(row=11, column=0, columnspan=2, sticky="w", padx=5)
-
         ttk.Label(parent, text="Có thể đặt sẵn Name.json / VP.json / HanViet.json vào thư mục trên;\n"
-
                                "file nào thiếu sẽ tự tải từ URL khi mở tab.",
-
                   foreground="#888").grid(row=12, column=0, columnspan=2, sticky="w", padx=5, pady=(4, 0))
-        
+
         ttk.Label(parent, text=f"File cấu hình (Name Sets): {TRANS_CONFIG_PATH}",
                   foreground="#888", wraplength=420).grid(row=13, column=0, columnspan=2, sticky="w", padx=5, pady=(4, 0))
         self.config_status_label = ttk.Label(parent, text="", foreground="#c0392b", wraplength=420)
@@ -6571,18 +5046,17 @@ class TabTranslate(ttk.Frame):
                 text=f"✓ File tồn tại. Bộ 'Mặc định' hiện có {mac_dinh_count} name lúc mở app.")
         except Exception as e:
             self.config_status_label.config(text=f"⚠ File tồn tại nhưng ĐỌC LỖI: {e}")
+
     def _refresh_dict_stats(self):
-
         if hasattr(self, "dict_stats_label") and self.engine.ready:
-
             self.dict_stats_label.config(text=f"Từ điển: {self.engine.stats()}")
+        app = self.winfo_toplevel()
+        if hasattr(app, "admin_panel"):
+            app.admin_panel._reset_view()
 
     def _force_redownload(self):
-
         if messagebox.askyesno("Xác nhận", "Tải lại toàn bộ từ điển từ web (ghi đè file hiện có)?", parent=self):
-
             self._collect_runtime_settings()
-
             self._load_dicts_async(force_download=True)
 
 def _first_font(root, candidates, fallback):
@@ -6739,58 +5213,89 @@ def apply_theme(root):
     style.configure("TSeparator", background=T["border"])
 
 # ═══════════════════════════════════════════════════════════
-
 #  PHẦN 9 — APP CHÍNH
-
 # ═══════════════════════════════════════════════════════════
 
 class App(tk.Tk):
 
     def __init__(self):
-
         super().__init__()
+        self.withdraw()
+        login = AdminLoginDialog(self, os.path.join(APP_DATA_DIR, "admin_config.json"))
+        self.wait_window(login)
+        if not login.result:
+            self.after_idle(self.destroy)
+            return
+        self.admin_client, datasets = login.result
+        self._apply_admin_datasets(datasets)
+        self.deiconify()
 
         apply_theme(self)
-
         self.title("Tool Dịch QT — Lọc tên | EPUB | Dịch QT")
-
         self.geometry("1350x800")
-
         self.minsize(900, 600)
 
         # Icon cửa sổ (app.ico nhúng trong exe hoặc nằm cạnh file)
-
         try:
-
             icon_path = os.path.join(getattr(sys, "_MEIPASS", _bundled_dir()), "app.ico")
-
             if os.path.exists(icon_path):
-
                 self.iconbitmap(icon_path)
-
         except Exception:
-
             pass
 
         nb = ttk.Notebook(self)
-
         nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         tab1 = TabNames(nb)
-
         tab2 = TabEpub(nb)
-
         tab3 = TabTranslate(nb)
+        self.tab1 = tab1
+        self.translate_tab = tab3
 
         nb.add(tab1, text="  👤 Lọc tên nhân vật  ")
-
         nb.add(tab2, text="  📚 Tạo & Gộp EPUB  ")
-
         nb.add(tab3, text="  🌐 Dịch Trung → Việt  ")
+        if self.admin_client.role == "admin":
+            self.admin_panel = AdminPanel(nb, self)
+            nb.add(self.admin_panel, text="  ⚙ Quản trị  ")
         tab1.translate_tab = tab3        # nút 'Dịch name' ở tab Lọc tên dùng engine + bộ tên của tab Dịch
+        tab2.translate_tab = tab3        # nút 'Lấy văn bản từ Dịch QT' ở tab EPUB đọc output_text của tab Dịch
         self.title(f"{self.title()}  —  v{APP_VERSION}")
-        sync_admin_lists_async(lambda changed: tab1._remove_blacklisted_from_results() if changed else None)
+        self._admin_list_sync_results = queue.Queue()
+
+        def poll_admin_list_sync():
+            try:
+                changed = self._admin_list_sync_results.get_nowait()
+            except queue.Empty:
+                changed = False
+            if changed:
+                tab1._remove_blacklisted_from_results()
+                if hasattr(self, "admin_panel"):
+                    self.admin_panel._reset_view()
+            if self.winfo_exists():
+                self.after(100, poll_admin_list_sync)
+
+        self.after(100, poll_admin_list_sync)
+        sync_admin_lists_async(self._admin_list_sync_results.put)
         check_for_update_async(self._on_update_checked)
+
+    def _apply_admin_datasets(self, datasets):
+        global ADMIN_REMOTE_DATA
+        if not isinstance(datasets, dict):
+            raise AdminApiError("Máy chủ trả về danh sách dữ liệu không hợp lệ.")
+        for name in ("hanviet", "name", "vp"):
+            entries = datasets.get(name, {})
+            if not isinstance(entries, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in entries.items()):
+                raise AdminApiError(f"Danh sách {name} từ máy chủ không đúng định dạng.")
+        ADMIN_REMOTE_DATA = datasets
+        remote_blacklist = datasets.get("blacklist", [])
+        if not isinstance(remote_blacklist, list) or any(not isinstance(word, str) for word in remote_blacklist):
+            raise AdminApiError("Blacklist từ máy chủ không đúng định dạng.")
+        ADMIN_LIST_WORDS["blacklist"].update(_custom_list_expand("blacklist", remote_blacklist))
+        _refresh_custom_list_targets()
+        self.admin_datasets = datasets
+        if hasattr(self, "tab1"):
+            self.tab1._remove_blacklisted_from_results()
 
     def _on_update_checked(self, has_new, tag, url):
         if not has_new:
@@ -6804,7 +5309,5 @@ class App(tk.Tk):
         self.after(0, ask)
 
 if __name__ == "__main__":
-
     app = App()
-
     app.mainloop()

@@ -1,9 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "files": {
     "blacklist": "blacklist.txt",
-    "surname": "surname.txt",
-    "trim_lead": "trim_lead.txt",
-    "trim_trail": "trim_trail.txt"
+    "trim_lead": "trim_lead.txt"
   }
 }

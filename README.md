@@ -44,6 +44,12 @@ dùng, không đụng tới Program Files.
    *Họ*, *Ký tự cắt đầu*, *Ký tự cắt cuối*. Bấm **🔄 Đồng bộ từ máy chủ** để
    nhận bản danh sách mới nhất (không mất phần bạn tự thêm).
 
+  Danh sách riêng trên máy được lưu trong `%APPDATA%\SLHTool`; danh sách máy chủ
+  được tải từ thư mục `slh-data/` trong repository. Mỗi mục máy chủ nằm trên một
+  dòng trong file tương ứng; tăng `version` trong `slh-data/version.json` sau khi
+  cập nhật để app tải bản mới. Danh sách máy chủ được thay thế theo version, còn
+  danh sách riêng trên máy không bị ghi đè.
+
 ### 2. 📚 Tạo & Gộp EPUB
 
 - **📄 Tạo EPUB (.docx / .txt)**: thêm file `.docx` hoặc `.txt` đã dịch xong,
@@ -67,6 +73,44 @@ dùng, không đụng tới Program Files.
 App tự kiểm tra bản mới mỗi khi mở. Có bản mới sẽ hỏi **"Có bản cập nhật —
 mở trang tải về?"**, bấm **Có** sẽ mở đúng trang Releases, tải bộ cài mới về
 cài đè lên (không mất dữ liệu, không cần gỡ bản cũ trước).
+
+## Tài khoản và quản trị dữ liệu
+
+Ứng dụng cần kết nối tới **SLH Admin API** để đăng nhập khi mở. Admin API là
+dịch vụ riêng, giữ GitHub token ở máy chủ và ghi dữ liệu bổ sung vào
+`slh-data/admin/` trong repository; không đưa GitHub token vào EXE.
+
+### Chạy Admin API
+
+Trên máy chủ Linux có HTTPS reverse proxy, clone repository rồi cài và chạy:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r admin-requirements.txt
+uvicorn admin_server:app --host 127.0.0.1 --port 8000
+```
+
+Cấu hình các biến môi trường trước khi chạy:
+
+- `SLH_GITHUB_TOKEN`: GitHub fine-grained token chỉ cấp quyền **Contents: Read and write** cho repository dữ liệu.
+- `SLH_GITHUB_REPO`: repository đích, mặc định `bachhoppo18/slh`.
+- `SLH_GITHUB_BRANCH`: nhánh cập nhật, mặc định `main`.
+- `SLH_AUTH_SECRET`: chuỗi bí mật ngẫu nhiên tối thiểu 32 ký tự để ký phiên đăng nhập.
+- `SLH_ADMIN_USERNAME` và `SLH_ADMIN_PASSWORD`: tài khoản admin đầu tiên; mật khẩu tối thiểu 12 ký tự.
+- `SLH_DB_PATH`: đường dẫn SQLite trên ổ đĩa bền vững của máy chủ, mặc định `slh-admin.sqlite3`.
+
+Chỉ lần chạy đầu tiên tạo admin từ hai biến bootstrap. Tài khoản user được admin
+cấp trong tab **Quản trị** của ứng dụng. Bảo vệ API bằng HTTPS và giữ ổ đĩa
+SQLite tồn tại qua các lần deploy/restart.
+
+### Đăng nhập và đồng bộ
+
+Lần đầu mở app, nhập URL HTTPS của Admin API và tài khoản được cấp. App xác thực
+và tải các mục bổ sung mỗi lần đăng nhập; danh sách từ điển nền vẫn lấy từ các
+file GitHub hiện có. Admin có thể tìm/xem HanViet, Name, VP, blacklist, thêm mục
+lên GitHub và cấp user ngay trong tab **Quản trị**. Blacklist thêm từ API được
+hợp nhất với danh sách máy chủ cũ, không ghi đè danh sách riêng trên máy.
 
 ## Dữ liệu của bạn được lưu ở đâu
 
