@@ -27,7 +27,7 @@ from collections import Counter
 from threading import Thread
 import threading
 import webbrowser
-from admin_ui import AdminLoginDialog
+from admin_ui import AdminLoginDialog, AdminPanel
 
 # ── Giao diện: bảng màu xanh lá + hồng pastel (sửa ở đây, toàn app đổi theo) ──
 THEME = {
@@ -568,6 +568,7 @@ CUSTOM_LIST_DEFS = {
 CUSTOM_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
 CUSTOM_LIST_BASE_WORDS = {key: set(info["target"]) for key, info in CUSTOM_LIST_DEFS.items()}
 ADMIN_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
+ADMIN_API_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
 ADMIN_REMOTE_DATA = {}
 
 def _admin_list_path(key):
@@ -577,7 +578,8 @@ def _refresh_custom_list_targets():
     for key, info in CUSTOM_LIST_DEFS.items():
         target = info["target"]
         target.clear()
-        target.update(CUSTOM_LIST_BASE_WORDS[key] | CUSTOM_LIST_WORDS[key] | ADMIN_LIST_WORDS[key])
+        target.update(CUSTOM_LIST_BASE_WORDS[key] | CUSTOM_LIST_WORDS[key]
+                  | ADMIN_LIST_WORDS[key] | ADMIN_API_LIST_WORDS[key])
 
 def _custom_list_path(key):
     return os.path.join(_custom_list_app_dir(), CUSTOM_LIST_DEFS[key]["file"])
@@ -4240,6 +4242,9 @@ class TabTranslate(ttk.Frame):
         self.engine = ZhViTranslator()
         self.is_translating = False
         self._last_translation_lang = "vi"
+        self._dict_loading = False
+        self._dict_reload_pending = False
+        self._dict_force_reload_pending = False
         self._build()
         self._load_dicts_async()
 
@@ -4358,6 +4363,12 @@ class TabTranslate(ttk.Frame):
         self.after(0, lambda: self.status_label.config(text=msg))
 
     def _load_dicts_async(self, force_download=False):
+        if self._dict_loading:
+            self._dict_reload_pending = True
+            self._dict_force_reload_pending |= force_download
+            return
+        self._dict_loading = True
+
         def worker():
             try:
                 os.makedirs(TRANS_DICT_DIR, exist_ok=True)
@@ -4422,7 +4433,20 @@ class TabTranslate(ttk.Frame):
                     self.after(0, warn)
             except Exception as e:
                 self._set_status(f"Lỗi nạp từ điển: {e}")
+            finally:
+                try:
+                    self.after(0, self._finish_dict_load)
+                except (tk.TclError, RuntimeError):
+                    pass
         threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_dict_load(self):
+        self._dict_loading = False
+        if self._dict_reload_pending:
+            force_download = self._dict_force_reload_pending
+            self._dict_reload_pending = False
+            self._dict_force_reload_pending = False
+            self._load_dicts_async(force_download=force_download)
 
     # ── thao tác input/output ─────────────────────────────
     def _load_file(self):
@@ -5352,6 +5376,9 @@ class App(tk.Tk):
         if not login.result:
             self.after_idle(self.destroy)
             return
+        self.session = login.result
+        self.admin_client = login.client
+        self.admin_datasets = {}
         self.deiconify()
 
         apply_theme(self)
@@ -5381,6 +5408,9 @@ class App(tk.Tk):
         nb.add(tab3, text="  🌐 Dịch Trung → Việt  ")
         tab1.translate_tab = tab3        # nút 'Dịch name' ở tab Lọc tên dùng engine + bộ tên của tab Dịch
         tab2.translate_tab = tab3        # nút 'Lấy văn bản từ Dịch QT' ở tab EPUB đọc output_text của tab Dịch
+        if self.session["source"] == "server" and self.session["role"] == "admin":
+            self.admin_panel = AdminPanel(nb, self)
+            nb.add(self.admin_panel, text="  ⚙ Quản trị  ")
         self.title(f"{self.title()}  —  v{APP_VERSION}")
         self._admin_list_sync_results = queue.Queue()
 
@@ -5398,7 +5428,45 @@ class App(tk.Tk):
 
         self.after(100, poll_admin_list_sync)
         sync_admin_lists_async(self._admin_list_sync_results.put)
+        if self.admin_client:
+            self._load_admin_datasets_async()
         check_for_update_async(self._on_update_checked)
+
+    def _apply_admin_datasets(self, datasets):
+        datasets = datasets if isinstance(datasets, dict) else {}
+        self.admin_datasets = {
+            key: datasets.get(key, {}) if isinstance(datasets.get(key, {}), dict) else {}
+            for key in ("hanviet", "name", "vp")
+        }
+        ADMIN_API_LIST_WORDS["blacklist"] = _custom_list_expand(
+            "blacklist", datasets.get("blacklist", [])
+        )
+        _refresh_custom_list_targets()
+        if hasattr(self, "tab1"):
+            self.tab1._remove_blacklisted_from_results()
+
+    def _load_admin_datasets_async(self):
+        def worker():
+            try:
+                datasets, error = self.admin_client.get_datasets(), None
+            except Exception as exc:
+                datasets, error = None, str(exc)
+
+            def apply():
+                if not self.winfo_exists():
+                    return
+                if error:
+                    self.translate_tab.status_label.config(text=f"Không tải được dữ liệu quản trị: {error}")
+                    return
+                self._apply_admin_datasets(datasets)
+                self.translate_tab._load_dicts_async()
+
+            try:
+                self.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_update_checked(self, has_new, tag, release_url, installer_url, installer_size, installer_digest):
         if not has_new:

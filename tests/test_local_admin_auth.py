@@ -6,6 +6,7 @@ import unittest
 from admin_ui import (
     LOCAL_ADMIN_DEFAULT_PASSWORD,
     LOCAL_ADMIN_USERNAME,
+    _save_admin_api_url,
     change_local_admin_password,
     initialize_local_admin,
     verify_local_admin,
@@ -36,6 +37,18 @@ class LocalAdminAuthTests(unittest.TestCase):
 
         initialize_local_admin(self.config_path)
 
+        self.assertTrue(verify_local_admin(
+            self.config_path, LOCAL_ADMIN_USERNAME, LOCAL_ADMIN_DEFAULT_PASSWORD
+        ))
+
+    def test_api_url_setting_preserves_local_admin_credentials(self):
+        initialize_local_admin(self.config_path)
+
+        _save_admin_api_url(self.config_path, "https://admin.example.com")
+
+        with open(self.config_path, encoding="utf-8") as file:
+            config = json.load(file)
+        self.assertEqual(config["api_url"], "https://admin.example.com")
         self.assertTrue(verify_local_admin(
             self.config_path, LOCAL_ADMIN_USERNAME, LOCAL_ADMIN_DEFAULT_PASSWORD
         ))

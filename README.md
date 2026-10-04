@@ -77,17 +77,49 @@ cập nhật bằng cách tải gói mới từ trang Releases.
 
 ## Tài khoản
 
-Ứng dụng không cần Admin API, URL máy chủ hay tài khoản trực tuyến. Đăng nhập
-cục bộ lần đầu bằng tài khoản `admin`, mật khẩu `123456`; chọn **Đổi mật khẩu**
-ngay trên cửa sổ đăng nhập để đặt mật khẩu riêng (tối thiểu 8 ký tự).
+App có hai cách đăng nhập:
 
-Thông tin đăng nhập được lưu tại `%APPDATA%\SLHTool\admin_config.json`; ứng dụng
-chỉ lưu mã băm mật khẩu, không lưu mật khẩu dạng văn bản. Đây là khóa truy cập
-cục bộ tiện dụng, không phải cơ chế bảo mật máy chủ: mật khẩu mặc định có trong
-bản ứng dụng, vì vậy hãy đổi mật khẩu trước khi chia sẻ hoặc dùng chung máy.
+- **Cục bộ**: tài khoản `admin`, mật khẩu mặc định lần đầu `123456`. Chọn
+  **Đổi mật khẩu cục bộ** để đổi mật khẩu (tối thiểu 8 ký tự). Tài khoản này
+  chỉ mở các chức năng trên máy, không quản lý tài khoản trên máy chủ.
+- **Máy chủ**: đăng nhập bằng tài khoản được cấp qua Admin API. Nhập URL gốc
+  HTTPS của API (ví dụ `https://your-service.example.com`, không thêm
+  `/auth/login`). URL được lưu tại `%APPDATA%\SLHTool\admin_config.json`; token
+  đăng nhập chỉ được giữ trong bộ nhớ của app. Admin sẽ có thêm tab **Quản trị**
+  để cấp user và cập nhật dữ liệu; user thường không thấy tab này.
 
-Các danh sách nền vẫn được đồng bộ trực tiếp từ repository dữ liệu; danh sách
-riêng được lưu trên máy và không bị ghi đè.
+### Triển khai Admin API
+
+Deploy `admin_server.py` lên một dịch vụ Python có HTTPS và ổ đĩa lưu trữ bền
+vững. Cài dependencies bằng `pip install -r admin-requirements.txt`, cấu hình
+các biến môi trường sau trên dịch vụ (không đưa GitHub token vào EXE):
+
+```text
+SLH_ADMIN_USERNAME=admin
+SLH_ADMIN_PASSWORD=<ít nhất 12 ký tự>
+SLH_AUTH_SECRET=<chuỗi ngẫu nhiên dài ít nhất 32 ký tự>
+SLH_GITHUB_TOKEN=<token có quyền đọc/ghi Contents của repository>
+SLH_GITHUB_REPO=bachhoppo18/slh
+SLH_GITHUB_BRANCH=main
+SLH_DB_PATH=<đường dẫn trên ổ lưu trữ bền vững>
+```
+
+Lệnh khởi động phổ biến:
+
+```bash
+uvicorn admin_server:app --host 0.0.0.0 --port $PORT
+```
+
+Sau khi deploy, kiểm tra `https://<domain>/health`. Mở app, chọn **Máy chủ**,
+nhập URL gốc và đăng nhập bằng admin. Server tạo tài khoản admin ban đầu từ
+`SLH_ADMIN_USERNAME` và `SLH_ADMIN_PASSWORD` khi database chưa có admin; admin
+có thể cấp user từ tab **Quản trị**. User cần tên 3–64 ký tự và mật khẩu ít
+nhất 12 ký tự. Giữ database trên persistent disk để tài khoản không mất khi
+dịch vụ restart hoặc deploy lại. HTTP chỉ được chấp nhận cho `localhost` khi
+thử nghiệm.
+
+Mã băm mật khẩu admin cục bộ vẫn nằm trong `%APPDATA%\SLHTool\admin_config.json`;
+app không lưu mật khẩu API hay token đăng nhập.
 
 ## Dữ liệu của bạn được lưu ở đâu
 
