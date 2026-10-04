@@ -37,9 +37,12 @@ jobs:
         shell: pwsh
         run: |
           if ("${{ github.ref_type }}" -eq "tag") {
-            $v = "${{ github.ref_name }}" -replace '^v', ''
+            $v = "${{ github.ref_name }}" -replace '^v\.?', ''
           } else {
             $v = "0.0.0-dev"    # chạy tay qua "Run workflow", không phải bản phát hành thật
+          }
+          if ($v -notmatch '^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$') {
+            throw "Tag phiên bản không hợp lệ: $v (dùng v1.2.3 hoặc v.1.2.3)"
           }
           echo "version=$v" >> $env:GITHUB_OUTPUT
           echo "Phiên bản build: $v"
@@ -52,14 +55,15 @@ jobs:
             Set-Content slhtool.py -Encoding utf8
           (Get-Content installer.iss -Raw) -replace '#define MyAppVersion "[^"]*"', "#define MyAppVersion `"$v`"" |
             Set-Content installer.iss -Encoding utf8
-          $v4 = "$v.0"; if (($v -split '\.').Count -ge 3) { $v4 = "$v.0" } else { $v4 = "$v.0.0.0" }
-          $parts = ($v -split '\.') + @('0','0','0','0')
+          $core = ($v -split '[-+]')[0]
+          $parts = $core -split '\.'
           $filevers = "$($parts[0]), $($parts[1]), $($parts[2]), 0"
+          $fileversion = "$core.0"
           (Get-Content version_info.txt -Raw) `
             -replace 'filevers=\([^)]*\)', "filevers=($filevers)" `
             -replace 'prodvers=\([^)]*\)', "prodvers=($filevers)" `
-            -replace "FileVersion', u'[^']*'", "FileVersion', u'$v.0'" `
-            -replace "ProductVersion', u'[^']*'", "ProductVersion', u'$v.0'" |
+            -replace "FileVersion', u'[^']*'", "FileVersion', u'$fileversion'" `
+            -replace "ProductVersion', u'[^']*'", "ProductVersion', u'$fileversion'" |
             Set-Content version_info.txt -Encoding utf8
 
       - name: Cài thư viện Python
