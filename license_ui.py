@@ -1,6 +1,7 @@
 """License activation dialog shown before opening the desktop application."""
 import json
 import os
+import queue
 import tkinter as tk
 import threading
 from tkinter import ttk
@@ -13,6 +14,7 @@ class LicenseDialog(tk.Toplevel):
         super().__init__(parent)
         self.config_path = config_path
         self.result = None
+        self._activation_results = queue.Queue()
         self.title("Kích hoạt SLH Tool")
         self.geometry("560x300")
         self.resizable(False, False)
@@ -75,32 +77,37 @@ class LicenseDialog(tk.Toplevel):
                 error = None
             except LicenseError as exc:
                 error = str(exc)
-
-            def finish():
-                if not self.winfo_exists():
-                    return
-                self.activate_button.config(state="normal")
-                if error:
-                    self.status.config(text=error)
-                    return
-                try:
-                    os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
-                    temporary_path = self.config_path + ".tmp"
-                    with open(temporary_path, "w", encoding="utf-8") as file:
-                        json.dump({"license_key": key}, file)
-                    os.replace(temporary_path, self.config_path)
-                except OSError as exc:
-                    self.status.config(text=f"Đã kích hoạt nhưng không lưu được key: {exc}")
-                    return
-                self.result = True
-                self.destroy()
-
-            try:
-                self.after(0, finish)
-            except (tk.TclError, RuntimeError):
-                pass
+            except Exception as exc:
+                error = f"Lỗi khi xác thực license: {exc}"
+            self._activation_results.put(error)
 
         threading.Thread(target=worker, daemon=True).start()
+        self.after(100, lambda: self._poll_activation_result(key))
+
+    def _poll_activation_result(self, key):
+        if not self.winfo_exists():
+            return
+        try:
+            error = self._activation_results.get_nowait()
+        except queue.Empty:
+            self.after(100, lambda: self._poll_activation_result(key))
+            return
+
+        self.activate_button.config(state="normal")
+        if error:
+            self.status.config(text=error)
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
+            temporary_path = self.config_path + ".tmp"
+            with open(temporary_path, "w", encoding="utf-8") as file:
+                json.dump({"license_key": key}, file)
+            os.replace(temporary_path, self.config_path)
+        except OSError as exc:
+            self.status.config(text=f"Đã kích hoạt nhưng không lưu được key: {exc}")
+            return
+        self.result = True
+        self.destroy()
 
     def _cancel(self):
         self.result = None
