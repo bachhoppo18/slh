@@ -8,7 +8,7 @@
 #   git push private v1.0.10
 #
 # Sau khoảng 3-5 phút, vào tab "Actions" của repo xem tiến trình build. Xong sẽ
-# tự tạo 1 "Release" mới ở tab "Releases" kèm SLHTool_Setup.exe.
+# tự tạo 1 "Release" mới ở tab "Releases" kèm bộ cài và các từ điển.
 name: Build Windows EXE
 
 on:
@@ -79,14 +79,18 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 
-      - name: Tạo GitHub Release kèm 2 file cho người dùng tải
+      - name: Tạo GitHub Release kèm bộ cài và từ điển
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           repository: bachhoppo18/slh
           token: ${{ secrets.SLH_RELEASE_TOKEN }}
           target_commitish: main
-          files: Output/SLHTool_Setup.exe
+          files: |
+            Output/SLHTool_Setup.exe
+            translate/Name.json
+            translate/VP.json
+            translate/HanViet.json
           generate_release_notes: true
 
       - name: Lưu file build (khi chạy thử bằng "Run workflow", không tạo Release)

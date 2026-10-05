@@ -2880,9 +2880,9 @@ import urllib.request
 from tkinter import scrolledtext, simpledialog
 
 TRANS_DEFAULT_SETTINGS = {
-    "nameUrl": "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/Name.json",
-    "vpUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/VP.json",
-    "hvUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/HanViet.json",
+    "nameUrl": "https://github.com/bachhoppo18/slh/releases/latest/download/Name.json",
+    "vpUrl":   "https://github.com/bachhoppo18/slh/releases/latest/download/VP.json",
+    "hvUrl":   "https://github.com/bachhoppo18/slh/releases/latest/download/HanViet.json",
     "maxMatchLen": 30,
     "priorityNameFirst": True,
     "punctMap": "vietnamese",
@@ -3295,6 +3295,20 @@ def _trans_remote_tag(url):
             continue
     return None
 
+def _trans_migrate_dictionary_urls(settings):
+    for key, filename in (
+        ("nameUrl", "Name.json"),
+        ("vpUrl", "VP.json"),
+        ("hvUrl", "HanViet.json"),
+    ):
+        old_urls = {
+            f"https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/{filename}",
+            f"https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/{filename}",
+        }
+        if settings.get(key) in old_urls:
+            settings[key] = TRANS_DEFAULT_SETTINGS[key]
+    return settings
+
 def trans_load_config():
     cfg = {}
     try:
@@ -3308,7 +3322,7 @@ def trans_load_config():
     cfg.setdefault("activeNameSet", list(cfg["nameSets"].keys())[0])
     settings = dict(TRANS_DEFAULT_SETTINGS)
     settings.update(cfg.get("translator_settings", {}))
-    cfg["translator_settings"] = settings
+    cfg["translator_settings"] = _trans_migrate_dictionary_urls(settings)
     return cfg
 
 def _ordered_name_set_names(name_sets):

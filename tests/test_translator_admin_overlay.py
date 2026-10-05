@@ -6,6 +6,7 @@ import unittest
 from slhtool import (
     TRANS_DEFAULT_SETTINGS,
     ZhViTranslator,
+    _trans_migrate_dictionary_urls,
     _trans_mirror_urls,
     exclude_names_already_in_set,
     filter_name_counter_by_set,
@@ -59,6 +60,23 @@ class TranslatorAdminOverlayTests(unittest.TestCase):
         self.assertNotIn("refs/heads/main", TRANS_DEFAULT_SETTINGS["nameUrl"])
         self.assertNotIn("refs/heads/main", TRANS_DEFAULT_SETTINGS["vpUrl"])
         self.assertNotIn("refs/heads/main", TRANS_DEFAULT_SETTINGS["hvUrl"])
+
+    def test_dictionary_urls_use_release_assets(self):
+        for key in ("nameUrl", "vpUrl", "hvUrl"):
+            self.assertIn("/releases/latest/download/", TRANS_DEFAULT_SETTINGS[key])
+
+    def test_migrate_old_dictionary_urls_but_preserve_custom_urls(self):
+        settings = {
+            "nameUrl": "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/Name.json",
+            "vpUrl": "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/VP.json",
+            "hvUrl": "https://example.com/custom-hanviet.json",
+        }
+
+        migrated = _trans_migrate_dictionary_urls(settings)
+
+        self.assertEqual(migrated["nameUrl"], TRANS_DEFAULT_SETTINGS["nameUrl"])
+        self.assertEqual(migrated["vpUrl"], TRANS_DEFAULT_SETTINGS["vpUrl"])
+        self.assertEqual(migrated["hvUrl"], "https://example.com/custom-hanviet.json")
 
     def test_trans_mirror_urls_strip_refs_prefixes(self):
         urls = _trans_mirror_urls(
