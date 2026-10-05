@@ -597,6 +597,7 @@ def _custom_list_expand(key, raw_lines):
             out.add(w)
     return out
 
+
 def load_custom_list(key):
     path = _custom_list_path(key)
     raw = []
@@ -1994,6 +1995,16 @@ def auto_scan_chapters(text, opts=None):
     return chs, False
 
 
+def _copy_chapters(chapters):
+    return [Chapter(ch.title, ch.content, ch.kind, ch.heading_line) for ch in chapters]
+
+
+def _load_preview_chapters(raw_text, saved_chapters=None):
+    if saved_chapters is not None:
+        return _copy_chapters(saved_chapters), False
+    return auto_scan_chapters(raw_text)
+
+
 def read_text_file(path):
     """Đọc TXT: UTF-8 (có/không BOM), UTF-16 có BOM; lỗi thì thử bảng mã tiếng Việt cp1258."""
     with open(path, "rb") as f:
@@ -2035,7 +2046,7 @@ class ChapterPreviewDialog(tk.Toplevel):
       • “Thêm chương trống” / “Xóa cả chương”.
     """
 
-    def __init__(self, parent, raw_text, source_name="", on_done=None):
+    def __init__(self, parent, raw_text, source_name="", on_done=None, saved_chapters=None):
         super().__init__(parent)
         self.title(f"Xem trước & sửa chương — {source_name}" if source_name else "Xem trước & sửa chương")
         self.geometry("1120x700")
@@ -2052,7 +2063,15 @@ class ChapterPreviewDialog(tk.Toplevel):
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self._auto_scan()
+        self.chapters, used_loose = _load_preview_chapters(self.raw_text, saved_chapters)
+        self._refresh_tree(select=0)
+        if saved_chapters is not None:
+            self.var_status.set(f"{len(self.chapters)} chương — đã nạp bản chỉnh sửa đã lưu")
+        elif used_loose:
+            self.var_status.set(
+                f"{self.var_status.get()}  •  ít tiêu đề “Chương X” → đã tự bật quét lỏng, "
+                "hãy xem các dòng tô vàng"
+            )
         try:
             self.wait_visibility()
             self.grab_set()
@@ -2713,16 +2732,17 @@ class TabEpub(ttk.Frame):
             return
 
         key = self._c_source_key(entry)
+        saved_chapters = self._c_chapter_edits.get(key)
 
         def save_edits(chapters):
             if chapters is not None:
-                self._c_chapter_edits[key] = [
-                    Chapter(ch.title, ch.content, ch.kind, ch.heading_line)
-                    for ch in chapters
-                ]
+                self._c_chapter_edits[key] = _copy_chapters(chapters)
                 self._log(self._c_log, f"Đã lưu chỉnh sửa chương cho: {label}")
 
-        ChapterPreviewDialog(self.winfo_toplevel(), text, label, on_done=save_edits)
+        ChapterPreviewDialog(
+            self.winfo_toplevel(), text, label, on_done=save_edits,
+            saved_chapters=saved_chapters,
+        )
 
     def _c_pick_outdir(self):
         d = filedialog.askdirectory(title="Chọn thư mục lưu EPUB")
@@ -2748,7 +2768,7 @@ class TabEpub(ttk.Frame):
         def run():
             entries = list(self._c_docx_files)
             edited_chapters = {
-                key: [Chapter(ch.title, ch.content, ch.kind, ch.heading_line) for ch in chapters]
+                key: _copy_chapters(chapters)
                 for key, chapters in self._c_chapter_edits.items()
             }
             used_names = set()

@@ -4,8 +4,10 @@ import tempfile
 import unittest
 
 from slhtool import (
+    Chapter,
     TRANS_DEFAULT_SETTINGS,
     ZhViTranslator,
+    _load_preview_chapters,
     _trans_migrate_dictionary_urls,
     _trans_mirror_urls,
     exclude_names_already_in_set,
@@ -14,6 +16,17 @@ from slhtool import (
 
 
 class TranslatorAdminOverlayTests(unittest.TestCase):
+    def test_preview_reopens_saved_chapter_edits_instead_of_rescanning_source(self):
+        saved = [Chapter("Chương 1: sửa", "Nội dung đã sửa", "thủ công", "Chương 1")]
+
+        reopened, used_loose = _load_preview_chapters(
+            "Tên truyện\nVăn án\nChương 1\nNội dung gốc", saved
+        )
+
+        self.assertFalse(used_loose)
+        self.assertEqual(reopened, saved)
+        self.assertIsNot(reopened[0], saved[0])
+
     def test_hanlp_counter_excludes_names_in_selected_set(self):
         filtered, excluded = filter_name_counter_by_set(
             {"林动": 8, "牧尘": 4}, {"林动": "Lâm Động"}
