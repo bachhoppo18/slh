@@ -2880,9 +2880,9 @@ import urllib.request
 from tkinter import scrolledtext, simpledialog
 
 TRANS_DEFAULT_SETTINGS = {
-    "nameUrl": "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/Name.json",
-    "vpUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/VP.json",
-    "hvUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/HanViet.json",
+    "nameUrl": "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/Name.json",
+    "vpUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/VP.json",
+    "hvUrl":   "https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/HanViet.json",
     "maxMatchLen": 30,
     "priorityNameFirst": True,
     "punctMap": "vietnamese",
@@ -3125,10 +3125,14 @@ class ZhViTranslator:
 
     def load(self, name_path, vp_path, hv_path, overlays=None):
         def read_json(path):
-            if path and os.path.exists(path):
+            if not path or not os.path.exists(path):
+                return {}
+            try:
                 with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            return {}
+                    data = json.load(f)
+            except (OSError, ValueError, TypeError):
+                return {}
+            return data if isinstance(data, dict) else {}
         overlays = overlays or {}
         name_data = read_json(name_path)
         vp_data = read_json(vp_path)
@@ -3245,10 +3249,25 @@ class ZhViTranslator:
 
 def _trans_mirror_urls(url):
     """Trả về [url gốc, mirror jsdelivr] — raw.githubusercontent hay bị chặn ở VN."""
-    urls = [url] if url else []
-    m = re.match(r'https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)', url or "")
-    if m:
-        urls.append(f"https://cdn.jsdelivr.net/gh/{m.group(1)}/{m.group(2)}@{m.group(3)}/{m.group(4)}")
+    if not url:
+        return []
+
+    urls = [url]
+    m = re.match(r'https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/(.+)', url)
+    if not m:
+        return urls
+
+    owner, repo, rest = m.groups()
+    rest = re.sub(r'^(?:refs/(?:heads|tags)/)', '', rest)
+    normalized = f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}"
+    if normalized not in urls:
+        urls.insert(0, normalized)
+
+    if "/" in rest:
+        branch, path = rest.split("/", 1)
+        mirror = f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
+        if mirror not in urls:
+            urls.append(mirror)
     return urls
 
 def _trans_download(url, dest, timeout=90):
@@ -4349,8 +4368,8 @@ class TabTranslate(ttk.Frame):
         self.progress_bar = ttk.Progressbar(ctrl, orient="horizontal", mode="determinate")
         self.progress_bar.grid(row=0, column=3, sticky="ew", padx=10)
         self.progress_bar.grid_remove()
-        ttk.Button(ctrl, text="▶ Việt (offline)", style="Accent.TButton", command=lambda: self._start_translation("vi")).grid(row=0, column=4, padx=(0, 4))
-        ttk.Button(ctrl, text="☁ Việt (server)", command=lambda: self._start_translation("vi-server")).grid(row=0, column=5, padx=(0, 4))
+        ttk.Button(ctrl, text="▶ Việt (offline)", command=lambda: self._start_translation("vi")).grid(row=0, column=4, padx=(0, 4))
+        ttk.Button(ctrl, text="☁ Việt (server)", style="Accent.TButton", command=lambda: self._start_translation("vi-server")).grid(row=0, column=5, padx=(0, 4))
         ttk.Button(ctrl, text="▶ Hán Việt", command=lambda: self._start_translation("hv")).grid(row=0, column=6, padx=(0, 4))
         ttk.Button(ctrl, text="📋 Sao chép", command=self._copy_result).grid(row=0, column=7, padx=(0, 4))
         ttk.Button(ctrl, text="💾 Xuất kết quả...", command=self._export_result).grid(row=0, column=8, padx=(0, 8))

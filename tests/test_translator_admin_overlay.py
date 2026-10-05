@@ -4,7 +4,9 @@ import tempfile
 import unittest
 
 from slhtool import (
+    TRANS_DEFAULT_SETTINGS,
     ZhViTranslator,
+    _trans_mirror_urls,
     exclude_names_already_in_set,
     filter_name_counter_by_set,
 )
@@ -52,6 +54,34 @@ class TranslatorAdminOverlayTests(unittest.TestCase):
         self.assertEqual(translator.name_raw["remote"]["val"], "mục mới")
         self.assertEqual(translator.vp_raw["remote-vp"]["val"], "dịch VP")
         self.assertEqual(translator.hv_dict["远"]["val"], "viễn")
+
+    def test_default_dictionary_urls_do_not_use_refs_heads(self):
+        self.assertNotIn("refs/heads/main", TRANS_DEFAULT_SETTINGS["nameUrl"])
+        self.assertNotIn("refs/heads/main", TRANS_DEFAULT_SETTINGS["vpUrl"])
+        self.assertNotIn("refs/heads/main", TRANS_DEFAULT_SETTINGS["hvUrl"])
+
+    def test_trans_mirror_urls_strip_refs_prefixes(self):
+        urls = _trans_mirror_urls(
+            "https://raw.githubusercontent.com/bachhoppo18/slh/refs/heads/main/translate/Name.json"
+        )
+        self.assertIn("https://raw.githubusercontent.com/bachhoppo18/slh/main/translate/Name.json", urls)
+        self.assertIn("https://cdn.jsdelivr.net/gh/bachhoppo18/slh@main/translate/Name.json", urls)
+
+    def test_load_handles_invalid_or_empty_dictionary_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name_path = os.path.join(directory, "Name.json")
+            vp_path = os.path.join(directory, "VP.json")
+            hv_path = os.path.join(directory, "HanViet.json")
+            for path in (name_path, vp_path, hv_path):
+                with open(path, "w", encoding="utf-8") as file:
+                    file.write("{not valid json")
+
+            translator = ZhViTranslator()
+            translator.load(name_path, vp_path, hv_path)
+
+        self.assertEqual(translator.name_raw, {})
+        self.assertEqual(translator.vp_raw, {})
+        self.assertEqual(translator.hv_dict, {})
 
 
 if __name__ == "__main__":
