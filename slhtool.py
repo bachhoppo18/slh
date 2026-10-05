@@ -2025,17 +2025,15 @@ def txt_chapters_to_epub(chapters):
 
 
 class ChapterPreviewDialog(tk.Toplevel):
-    """Cửa sổ xem trước & sửa nhanh danh sách chương (modal).
+    """Cửa sổ riêng để xem/sửa nội dung nguồn theo chương (modal).
 
-    Gọi on_done(danh_sách_Chapter) khi bấm “Xác nhận và Tạo EPUB”, hoặc on_done(None) khi hủy.
-      • Chọn 1 dòng bên trái -> xem nội dung, sửa tên ở ô “Tiêu đề”.
+    Gọi on_done(danh_sách_Chapter) khi lưu, hoặc on_done(None) khi hủy.
+      • Chọn một chương bên trái -> sửa tiêu đề và nội dung trực tiếp.
       • “Xóa tiêu đề (gộp lên)”: tiêu đề bị nhận nhầm trở về thành văn bản, dồn vào chương trên.
       • “Tách chương tại dòng con trỏ”: bấm vào 1 dòng trong khung nội dung, dòng đó thành
         tiêu đề của chương mới (dùng khi regex bỏ sót chương).
       • “Thêm chương trống” / “Xóa cả chương”.
     """
-
-    PREVIEW_MAX_CHARS = 300_000     # chỉ hiển thị tối đa chừng này ký tự cho mỗi chương
 
     def __init__(self, parent, raw_text, source_name="", on_done=None):
         super().__init__(parent)
@@ -2050,6 +2048,7 @@ class ChapterPreviewDialog(tk.Toplevel):
         self._loading = False
         self._dirty = False
         self._done = False
+        self._displayed_chapter_idx = None
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -2118,9 +2117,7 @@ class ChapterPreviewDialog(tk.Toplevel):
         self.txt.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=(6, 0))
         tsb.grid(row=1, column=2, sticky="ns")
         self.txt.tag_configure("cur", background=THEME["g200"])
-        self.txt.bind("<Key>", self._block_edit)
-        self.txt.bind("<<Paste>>", lambda e: "break")
-        self.txt.bind("<<Cut>>", lambda e: "break")
+        self.txt.bind("<<Modified>>", self._on_content_edit)
         self.txt.bind("<ButtonRelease-1>", self._hl_cursor_line)
         self.txt.bind("<KeyRelease>", self._hl_cursor_line)
 
@@ -2146,8 +2143,8 @@ class ChapterPreviewDialog(tk.Toplevel):
         bot.columnconfigure(0, weight=1)
         self.var_status = tk.StringVar()
         ttk.Label(bot, textvariable=self.var_status, style="Ok.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(bot, text="Hủy (bỏ qua file này)", command=self._cancel).grid(row=0, column=1, padx=4)
-        ttk.Button(bot, text="✔ Xác nhận và Tạo EPUB", style="Accent.TButton",
+        ttk.Button(bot, text="Hủy chỉnh sửa", command=self._cancel).grid(row=0, column=1, padx=4)
+        ttk.Button(bot, text="✔ Lưu chỉnh sửa", style="Accent.TButton",
                    command=self._confirm).grid(row=0, column=2, padx=4)
 
     def _set_sash(self):
@@ -2166,15 +2163,17 @@ class ChapterPreviewDialog(tk.Toplevel):
         note = ""
         try:
             if auto:
-                self.chapters, used_loose = auto_scan_chapters(self.raw_text, self._scan_options())
+                chapters, used_loose = auto_scan_chapters(self.raw_text, self._scan_options())
                 if used_loose:
                     self.var_loose.set(True)
                     note = "ít tiêu đề “Chương X” → đã tự bật quét lỏng, hãy xem các dòng tô vàng"
             else:
-                self.chapters = split_chapters(self.raw_text, self._scan_options())
+                chapters = split_chapters(self.raw_text, self._scan_options())
         except ValueError as e:
             messagebox.showerror("Regex lỗi", str(e), parent=self)
             return False
+        self._displayed_chapter_idx = None
+        self.chapters = chapters
         self._dirty = False
         self._refresh_tree(select=0)
         if note:
@@ -2185,6 +2184,7 @@ class ChapterPreviewDialog(tk.Toplevel):
         self._scan(auto=True)
 
     def _rescan(self):
+        self._sync_displayed_content()
         if self._dirty and not messagebox.askyesno(
                 "Quét lại?", "Quét lại sẽ bỏ các chỉnh sửa thủ công. Tiếp tục?", parent=self):
             return
@@ -2232,23 +2232,24 @@ class ChapterPreviewDialog(tk.Toplevel):
         self._show_chapter(self._cur_index())
 
     def _show_chapter(self, idx):
+        if not self._loading:
+            self._sync_displayed_content()
         self._loading = True
         try:
             self.txt.delete("1.0", "end")
             if idx is None or idx >= len(self.chapters):
                 self.var_title.set("")
                 self.lbl_info.config(text="")
+                self._displayed_chapter_idx = None
+                self.txt.edit_modified(False)
                 return
             ch = self.chapters[idx]
+            self._displayed_chapter_idx = idx
             self.var_title.set(ch.title)
-            shown, note = ch.content, ""
-            if len(shown) > self.PREVIEW_MAX_CHARS:
-                cut = shown.rfind("\n", 0, self.PREVIEW_MAX_CHARS)
-                shown = shown[: cut if cut > 0 else self.PREVIEW_MAX_CHARS]
-                note = "  — chỉ hiển thị phần đầu"
-            self.txt.insert("1.0", shown)
+            self.txt.insert("1.0", ch.content)
             self.txt.mark_set("insert", "1.0")
-            self.lbl_info.config(text=f"{len(ch.content):,} ký tự{note}")
+            self.txt.edit_modified(False)
+            self.lbl_info.config(text=f"{len(ch.content):,} ký tự — có thể sửa trực tiếp")
         finally:
             self._loading = False
 
@@ -2262,13 +2263,24 @@ class ChapterPreviewDialog(tk.Toplevel):
         self._dirty = True
         self.tree.set(str(i), "title", self.var_title.get())
 
-    # ── khung nội dung chỉ đọc ─────────────────────────────────────────────
-    @staticmethod
-    def _block_edit(e):
-        nav = {"Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"}
-        if e.keysym in nav or (e.state & 0x4 and e.keysym.lower() in ("c", "a")):
-            return None
-        return "break"
+    def _on_content_edit(self, _event=None):
+        if self._loading:
+            return
+        self._sync_displayed_content()
+
+    def _sync_displayed_content(self):
+        idx = self._displayed_chapter_idx
+        if idx is None or idx >= len(self.chapters):
+            self.txt.edit_modified(False)
+            return
+        content = self.txt.get("1.0", "end-1c")
+        chapter = self.chapters[idx]
+        if chapter.content != content:
+            chapter.content = content
+            self._dirty = True
+            self.tree.set(str(idx), "chars", f"{len(content):,}")
+            self.lbl_info.config(text=f"{len(content):,} ký tự — đã chỉnh sửa")
+        self.txt.edit_modified(False)
 
     def _hl_cursor_line(self, _e=None):
         self.txt.tag_remove("cur", "1.0", "end")
@@ -2279,6 +2291,8 @@ class ChapterPreviewDialog(tk.Toplevel):
         i = self._cur_index()
         if i is None:
             return
+        self._on_content_edit()
+        self._displayed_chapter_idx = None
         ch = self.chapters[i]
         line_no = int(self.txt.index("insert").split(".")[0]) - 1
         lines = ch.content.split("\n")
@@ -2295,6 +2309,8 @@ class ChapterPreviewDialog(tk.Toplevel):
         self._refresh_tree(select=i + 1)
 
     def _add_empty(self):
+        self._on_content_edit()
+        self._displayed_chapter_idx = None
         i = self._cur_index()
         pos = (i + 1) if i is not None else len(self.chapters)
         self.chapters.insert(pos, Chapter("Chương mới", "", "thủ công", ""))
@@ -2305,12 +2321,14 @@ class ChapterPreviewDialog(tk.Toplevel):
 
     def _remove_heading(self):
         """Tiêu đề nhận nhầm -> trả về thành dòng văn bản, gộp nội dung vào chương trên."""
+        self._on_content_edit()
         i = self._cur_index()
         if i is None:
             return
         ch = self.chapters[i]
         block = "\n".join(x for x in (ch.heading_line, ch.content) if x)
         if i > 0:
+            self._displayed_chapter_idx = None
             prev = self.chapters[i - 1]
             prev.content = "\n".join(x for x in (prev.content, block) if x)
             del self.chapters[i]
@@ -2324,12 +2342,15 @@ class ChapterPreviewDialog(tk.Toplevel):
                     "Đây là phần chữ nằm trước tiêu đề đầu tiên nên không có chương nào ở trên.\n"
                     "Dùng “Xóa cả chương” nếu muốn bỏ phần này.", parent=self)
                 return
+            self._displayed_chapter_idx = None
             ch.title, ch.kind, ch.content, ch.heading_line = "Mở đầu", "mở đầu", block, ""
             sel = 0
+        self._displayed_chapter_idx = None
         self._dirty = True
         self._refresh_tree(select=sel)
 
     def _delete_chapter(self):
+        self._on_content_edit()
         i = self._cur_index()
         if i is None:
             return
@@ -2339,6 +2360,7 @@ class ChapterPreviewDialog(tk.Toplevel):
                 f"Xóa “{ch.title}” và toàn bộ {len(ch.content):,} ký tự nội dung?\n"
                 "(Muốn giữ chữ, hãy dùng “Xóa tiêu đề (gộp lên)”.)", parent=self):
             return
+        self._displayed_chapter_idx = None
         del self.chapters[i]
         self._dirty = True
         self._refresh_tree(select=max(i - 1, 0))
@@ -2357,6 +2379,7 @@ class ChapterPreviewDialog(tk.Toplevel):
             self.on_done(result)
 
     def _confirm(self):
+        self._sync_displayed_content()
         if not self.chapters:
             messagebox.showwarning("Trống", "Chưa có chương nào để tạo EPUB.", parent=self)
             return
@@ -2370,8 +2393,9 @@ class ChapterPreviewDialog(tk.Toplevel):
         self._finish(result)
 
     def _cancel(self):
+        self._sync_displayed_content()
         if self._dirty and not messagebox.askyesno(
-                "Bỏ qua file này?", "Các chỉnh sửa chưa được dùng để tạo EPUB sẽ mất. Đóng thật không?",
+                "Bỏ chỉnh sửa?", "Các chỉnh sửa chưa lưu sẽ bị mất. Đóng thật không?",
                 parent=self):
             return
         self._finish(None)
@@ -2382,6 +2406,7 @@ class TabEpub(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.translate_tab = None      # được App gắn vào: tab Dịch Trung → Việt (lấy văn bản kết quả dịch)
+        self._c_chapter_edits = {}
         self._build()
 
     def _build(self):
@@ -2474,9 +2499,10 @@ class TabEpub(ttk.Frame):
         # Mỗi phần tử: chuỗi đường dẫn file, HOẶC dict {"kind":"text","label":...,"text":...}
         # cho nguồn là văn bản dán trực tiếp (vd. lấy từ tab Dịch QT), không cần file trên đĩa.
         self._c_docx_files = []
-        self._c_preview_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(docx_f, text="Với văn bản .txt / dán từ Dịch QT: xem trước & sửa chương trước khi tạo EPUB",
-                        variable=self._c_preview_var).pack(anchor="w", padx=8, pady=(0, 6))
+        ttk.Button(
+            docx_f, text="👁 Xem trước & sửa nguồn đang chọn",
+            command=self._c_preview_selected,
+        ).pack(anchor="w", padx=8, pady=(0, 6))
 
         # Thư mục lưu
         out_f = ttk.LabelFrame(left, text="Thư mục lưu EPUB")
@@ -2650,12 +2676,53 @@ class TabEpub(ttk.Frame):
             messagebox.showinfo("Thông báo", "Chọn 1 hoặc nhiều file trong danh sách trước (giữ Ctrl để chọn nhiều).")
             return
         for i in reversed(sel):
+            self._c_chapter_edits.pop(self._c_source_key(self._c_docx_files[i]), None)
             self._c_docx_lb.delete(i)
             del self._c_docx_files[i]
 
     def _c_clear_docx(self):
         self._c_docx_files.clear()
+        self._c_chapter_edits.clear()
         self._c_docx_lb.delete(0, tk.END)
+
+    @staticmethod
+    def _c_source_key(entry):
+        return ("text", id(entry)) if isinstance(entry, dict) else ("file", entry)
+
+    def _c_read_text_source(self, entry):
+        if isinstance(entry, dict):
+            return entry["text"], entry["label"]
+        if entry.lower().endswith(".txt"):
+            return read_text_file(entry), os.path.basename(entry)
+        raise ValueError("Xem trước & sửa hiện hỗ trợ văn bản .txt và văn bản lấy từ Dịch QT.")
+
+    def _c_preview_selected(self):
+        selection = self._c_docx_lb.curselection()
+        if len(selection) != 1:
+            messagebox.showinfo(
+                "Chọn một nguồn",
+                "Hãy chọn đúng một file .txt hoặc nguồn Dịch QT trong danh sách.",
+                parent=self,
+            )
+            return
+        entry = self._c_docx_files[selection[0]]
+        try:
+            text, label = self._c_read_text_source(entry)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Không mở được nguồn", str(e), parent=self)
+            return
+
+        key = self._c_source_key(entry)
+
+        def save_edits(chapters):
+            if chapters is not None:
+                self._c_chapter_edits[key] = [
+                    Chapter(ch.title, ch.content, ch.kind, ch.heading_line)
+                    for ch in chapters
+                ]
+                self._log(self._c_log, f"Đã lưu chỉnh sửa chương cho: {label}")
+
+        ChapterPreviewDialog(self.winfo_toplevel(), text, label, on_done=save_edits)
 
     def _c_pick_outdir(self):
         d = filedialog.askdirectory(title="Chọn thư mục lưu EPUB")
@@ -2676,13 +2743,17 @@ class TabEpub(ttk.Frame):
         if not self._c_outdir:
             messagebox.showwarning("Thiếu thư mục", "Vui lòng chọn thư mục lưu.")
             return
-        preview = bool(self._c_preview_var.get())
         log = lambda m: self._log(self._c_log, m)
 
         def run():
             entries = list(self._c_docx_files)
+            edited_chapters = {
+                key: [Chapter(ch.title, ch.content, ch.kind, ch.heading_line) for ch in chapters]
+                for key, chapters in self._c_chapter_edits.items()
+            }
             used_names = set()
             for entry in entries:
+                source_key = self._c_source_key(entry)
                 is_text_source = isinstance(entry, dict)
                 if is_text_source:
                     fname = entry["label"]
@@ -2694,16 +2765,15 @@ class TabEpub(ttk.Frame):
                     use_title = title if len(entries) == 1 else os.path.splitext(fname)[0]
                     log(f"[►] Đang xử lý: {fname}")
                 try:
-                    if is_text_source:
-                        chapters = self._c_chapters_from_text(entry["text"], entry["label"], preview, log)
+                    if source_key in edited_chapters:
+                        chapters = txt_chapters_to_epub(edited_chapters[source_key])
+                    elif is_text_source:
+                        chapters = self._c_chapters_from_text(entry["text"], log)
                     elif fp.lower().endswith('.txt'):
-                        chapters = self._c_chapters_from_txt(fp, preview, log)
+                        chapters = self._c_chapters_from_txt(fp, log)
                     else:
                         html     = _read_docx_html(fp)
                         chapters = _split_chapters(html)
-                    if chapters is None:
-                        log("    ⏭ Đã hủy ở cửa sổ xem trước — bỏ qua nguồn này")
-                        continue
                     log(f"    {len(chapters)} chương tìm thấy")
                     base = re.sub(r'[\\/:*?"<>|]', '_', use_title)
                     name, n = base, 2
@@ -2722,34 +2792,17 @@ class TabEpub(ttk.Frame):
             log("✅ Hoàn tất tất cả nguồn!")
         Thread(target=run, daemon=True).start()
 
-    def _c_chapters_from_text(self, text, source_label, preview, log):
-        """Lõi dùng chung: 1 khối văn bản (không nhất thiết từ file) -> danh sách chương.
-        Dùng cho cả file .txt lẫn văn bản dán từ tab Dịch QT.
-        Trả về None nếu người dùng hủy ở cửa sổ xem trước.
-        Hàm này chạy ở luồng nền: cửa sổ xem trước mở trên luồng giao diện, luồng nền đứng đợi."""
-        if not preview:
-            chs, used_loose = auto_scan_chapters(text)
-            if used_loose:
-                log("    ⚠ Ít tiêu đề “Chương X” → đã dùng quét lỏng (nên bật xem trước để kiểm tra)")
-            return txt_chapters_to_epub(chs)
-        log("    ⏳ Đang chờ bạn kiểm tra chương trong cửa sổ xem trước…")
-        q = queue.Queue()
+    def _c_chapters_from_text(self, text, log):
+        """Tự quét một khối văn bản thành chương khi chưa có bản chỉnh sửa đã lưu."""
+        chs, used_loose = auto_scan_chapters(text)
+        if used_loose:
+            log("    ⚠ Ít tiêu đề “Chương X” → đã dùng quét lỏng")
+        return txt_chapters_to_epub(chs)
 
-        def open_dialog():
-            try:
-                ChapterPreviewDialog(self.winfo_toplevel(), text, source_label, on_done=q.put)
-            except Exception as e:                              # đừng để luồng nền treo mãi
-                q.put(e)
-        self.after(0, open_dialog)
-        result = q.get()
-        if isinstance(result, Exception):
-            raise result
-        return None if result is None else txt_chapters_to_epub(result)
-
-    def _c_chapters_from_txt(self, fp, preview, log):
-        """Đọc file TXT trên đĩa rồi dùng chung lõi _c_chapters_from_text."""
+    def _c_chapters_from_txt(self, fp, log):
+        """Đọc TXT rồi tự quét chương khi chưa có bản chỉnh sửa đã lưu."""
         text = read_text_file(fp)
-        return self._c_chapters_from_text(text, os.path.basename(fp), preview, log)
+        return self._c_chapters_from_text(text, log)
 
 
     # ── Merge actions ─────────────────────────────────────
