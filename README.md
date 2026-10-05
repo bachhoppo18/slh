@@ -6,10 +6,9 @@ Word hay các công cụ trung gian khác.
 
 ## Tải về
 
-Vào **[Releases](https://github.com/bachhoppo18/slh/releases/latest)**, tải 1 trong 2 file:
+Vào **[Releases](https://github.com/bachhoppo18/slh/releases/latest)**, tải:
 
 - **`SLHTool_Setup.exe`** *(khuyên dùng)* — bộ cài, có Start Menu, gỡ cài đặt được; có thể tự cài bản mới khi xác nhận cập nhật trong app.
-- **`slhtool_portable.zip`** — giải nén ra là chạy luôn `slhtool.exe`, không cần cài, hợp máy không cho cài phần mềm.
 
 Không cần tài khoản Windows quyền Admin — cài vào thư mục riêng của người
 dùng, không đụng tới Program Files.
@@ -72,54 +71,17 @@ dùng, không đụng tới Program Files.
 
 App tự kiểm tra bản mới mỗi khi mở. Với bản cài `SLHTool_Setup.exe`, app có thể
 tải bộ cài mới, xác minh file, cài đè im lặng và mở lại app sau khi bạn xác nhận.
-Cấu hình và bộ tên trong `%APPDATA%\SLHTool` được giữ nguyên. Bản portable vẫn
-cập nhật bằng cách tải gói mới từ trang Releases.
+Cấu hình và bộ tên trong `%APPDATA%\SLHTool` được giữ nguyên.
 
-## Tài khoản
+## Kích hoạt
 
-App có hai cách đăng nhập:
+Mỗi người dùng cần gửi **mã máy** hiển thị trong cửa sổ kích hoạt cho chủ ứng
+dụng để được cấp key riêng. App kiểm tra cặp key/mã máy trực tiếp từ Gist qua
+HTTPS khi mở; một máy chỉ nhận một key và key không dùng được trên máy khác.
+Cần kết nối Internet mỗi lần mở app. Mã máy được băm trước khi lưu trên Gist.
 
-- **Cục bộ**: tài khoản `admin`, mật khẩu mặc định lần đầu `123456`. Chọn
-  **Đổi mật khẩu cục bộ** để đổi mật khẩu (tối thiểu 8 ký tự). Tài khoản này
-  chỉ mở các chức năng trên máy, không quản lý tài khoản trên máy chủ.
-- **Máy chủ**: đăng nhập bằng tài khoản được cấp qua Admin API. Nhập URL gốc
-  HTTPS của API (ví dụ `https://your-service.example.com`, không thêm
-  `/auth/login`). URL được lưu tại `%APPDATA%\SLHTool\admin_config.json`; token
-  đăng nhập chỉ được giữ trong bộ nhớ của app. Admin sẽ có thêm tab **Quản trị**
-  để cấp user và cập nhật dữ liệu; user thường không thấy tab này.
-
-### Triển khai Admin API
-
-Deploy `admin_server.py` lên một dịch vụ Python có HTTPS và ổ đĩa lưu trữ bền
-vững. Cài dependencies bằng `pip install -r admin-requirements.txt`, cấu hình
-các biến môi trường sau trên dịch vụ (không đưa GitHub token vào EXE):
-
-```text
-SLH_ADMIN_USERNAME=admin
-SLH_ADMIN_PASSWORD=<ít nhất 12 ký tự>
-SLH_AUTH_SECRET=<chuỗi ngẫu nhiên dài ít nhất 32 ký tự>
-SLH_GITHUB_TOKEN=<token có quyền đọc/ghi Contents của repository>
-SLH_GITHUB_REPO=bachhoppo18/slh
-SLH_GITHUB_BRANCH=main
-SLH_DB_PATH=<đường dẫn trên ổ lưu trữ bền vững>
-```
-
-Lệnh khởi động phổ biến:
-
-```bash
-uvicorn admin_server:app --host 0.0.0.0 --port $PORT
-```
-
-Sau khi deploy, kiểm tra `https://<domain>/health`. Mở app, chọn **Máy chủ**,
-nhập URL gốc và đăng nhập bằng admin. Server tạo tài khoản admin ban đầu từ
-`SLH_ADMIN_USERNAME` và `SLH_ADMIN_PASSWORD` khi database chưa có admin; admin
-có thể cấp user từ tab **Quản trị**. User cần tên 3–64 ký tự và mật khẩu ít
-nhất 12 ký tự. Giữ database trên persistent disk để tài khoản không mất khi
-dịch vụ restart hoặc deploy lại. HTTP chỉ được chấp nhận cho `localhost` khi
-thử nghiệm.
-
-Mã băm mật khẩu admin cục bộ vẫn nằm trong `%APPDATA%\SLHTool\admin_config.json`;
-app không lưu mật khẩu API hay token đăng nhập.
+Thông tin tạo key và cập nhật allowlist nằm trong tài liệu vận hành của
+repository source riêng tư.
 
 ## Dữ liệu của bạn được lưu ở đâu
 

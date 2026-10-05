@@ -1,4 +1,5 @@
-# Tự động build file .exe + bộ cài Windows mỗi khi bạn đẩy 1 "tag" dạng v1.0.0.
+# Workflow này đặt trong repo source PRIVATE. Mỗi tag v1.0.0 sẽ build bản phát hành
+# đã obfuscate và chỉ upload bộ cài sang repo PUBLIC bachhoppo18/slh.
 #
 # Cách phát hành bản mới (làm trên máy bạn, không cần Windows):
 #   git add -A
@@ -7,9 +8,7 @@
 #   git push origin main --tags
 #
 # Sau khoảng 3-5 phút, vào tab "Actions" của repo xem tiến trình build. Xong sẽ
-# tự tạo 1 "Release" mới ở tab "Releases" kèm 2 file cho người dùng tải:
-#   - SLHTool_Setup.exe        (bộ cài, khuyên dùng)
-#   - slhtool_portable.zip   (giải nén ra chạy luôn, không cần cài)
+# tự tạo 1 "Release" mới ở tab "Releases" kèm SLHTool_Setup.exe.
 name: Build Windows EXE
 
 on:
@@ -18,7 +17,7 @@ on:
   workflow_dispatch:      # cho phép bấm nút "Run workflow" trên GitHub để build thử, không cần tạo tag
 
 permissions:
-  contents: write          # cần quyền này để tạo Release
+  contents: read
 
 jobs:
   build:
@@ -69,13 +68,14 @@ jobs:
       - name: Cài thư viện Python
         run: pip install -r requirements.txt
 
+      - name: Cài PyArmor
+        run: pip install "pyarmor>=9,<10"
+
+      - name: Obfuscate mã Python bằng PyArmor
+        run: pyarmor gen -r -O build/obfuscated slhtool.py
+
       - name: Build .exe (PyInstaller, chế độ onedir)
         run: pyinstaller slhtool.spec
-
-      - name: Đóng gói bản "portable" (giải nén ra chạy luôn, không cần cài)
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\slhtool\*" -DestinationPath "slhtool_portable.zip"
 
       - name: Cài Inno Setup
         run: choco install innosetup -y --no-progress
@@ -89,9 +89,10 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            Output/SLHTool_Setup.exe
-            slhtool_portable.zip
+          repository: bachhoppo18/slh
+          token: ${{ secrets.SLH_RELEASE_TOKEN }}
+          target_commitish: main
+          files: Output/SLHTool_Setup.exe
           generate_release_notes: true
 
       - name: Lưu file build (khi chạy thử bằng "Run workflow", không tạo Release)
@@ -99,6 +100,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: slhtool-build-thu
-          path: |
-            Output/SLHTool_Setup.exe
-            slhtool_portable.zip
+          path: Output/SLHTool_Setup.exe

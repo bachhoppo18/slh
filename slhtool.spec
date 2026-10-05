@@ -13,8 +13,8 @@ from PyInstaller.utils.hooks import collect_submodules
 block_cipher = None
 
 a = Analysis(
-    ['slhtool.py'],
-    pathex=[],
+    ['build/obfuscated/slhtool.py'],
+    pathex=['build/obfuscated'],
     binaries=[],
     datas=[
         ('app.ico', '.'),   # icon nhúng theo exe, app đọc qua _bundled_dir()/app.ico lúc chạy

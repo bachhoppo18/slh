@@ -27,7 +27,7 @@ from collections import Counter
 from threading import Thread
 import threading
 import webbrowser
-from admin_ui import AdminLoginDialog, AdminPanel
+from license_ui import LicenseDialog
 
 # ── Giao diện: bảng màu xanh lá + hồng pastel (sửa ở đây, toàn app đổi theo) ──
 THEME = {
@@ -55,7 +55,7 @@ FONT_MONO = ("Consolas", 10)      # chỉ dùng cho nhật ký (log)
 #  PHIÊN BẢN & CẬP NHẬT — ĐIỀN LẠI 2 DÒNG NÀY SAU KHI TẠO REPO GITHUB CỦA BẠN
 # ══════════════════════════════════════════════════════════════════════════
 APP_VERSION = "1.0.0"
-GITHUB_REPO = "bachhoppo18/slh"          # repo chứa mã nguồn + bản .exe (GitHub Releases)
+GITHUB_REPO = "bachhoppo18/slh"          # repo công khai chứa Releases và dữ liệu runtime
 DATA_REPO   = "bachhoppo18/slh"          # repo riêng, CHỈ chứa danh sách loại trừ — bạn sửa hoài ở đây
 DATA_BRANCH = "main"
 
@@ -568,7 +568,6 @@ CUSTOM_LIST_DEFS = {
 CUSTOM_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
 CUSTOM_LIST_BASE_WORDS = {key: set(info["target"]) for key, info in CUSTOM_LIST_DEFS.items()}
 ADMIN_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
-ADMIN_API_LIST_WORDS = {key: set() for key in CUSTOM_LIST_DEFS}
 ADMIN_REMOTE_DATA = {}
 
 def _admin_list_path(key):
@@ -579,7 +578,7 @@ def _refresh_custom_list_targets():
         target = info["target"]
         target.clear()
         target.update(CUSTOM_LIST_BASE_WORDS[key] | CUSTOM_LIST_WORDS[key]
-                  | ADMIN_LIST_WORDS[key] | ADMIN_API_LIST_WORDS[key])
+              | ADMIN_LIST_WORDS[key])
 
 def _custom_list_path(key):
     return os.path.join(_custom_list_app_dir(), CUSTOM_LIST_DEFS[key]["file"])
@@ -4406,7 +4405,6 @@ class TabTranslate(ttk.Frame):
                     os.path.join(TRANS_DICT_DIR, "Name.json"),
                     os.path.join(TRANS_DICT_DIR, "VP.json"),
                     os.path.join(TRANS_DICT_DIR, "HanViet.json"),
-                    overlays=getattr(self.winfo_toplevel(), "admin_datasets", {}),
                 )
                 missing = [f for f in ("Name.json", "VP.json", "HanViet.json")
                            if not os.path.exists(os.path.join(TRANS_DICT_DIR, f))]
@@ -5371,14 +5369,11 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.withdraw()
-        login = AdminLoginDialog(self, os.path.join(APP_DATA_DIR, "admin_config.json"))
+        login = LicenseDialog(self, os.path.join(APP_DATA_DIR, "license.json"))
         self.wait_window(login)
         if not login.result:
             self.after_idle(self.destroy)
             return
-        self.session = login.result
-        self.admin_client = login.client
-        self.admin_datasets = {}
         self.deiconify()
 
         apply_theme(self)
@@ -5408,9 +5403,6 @@ class App(tk.Tk):
         nb.add(tab3, text="  🌐 Dịch Trung → Việt  ")
         tab1.translate_tab = tab3        # nút 'Dịch name' ở tab Lọc tên dùng engine + bộ tên của tab Dịch
         tab2.translate_tab = tab3        # nút 'Lấy văn bản từ Dịch QT' ở tab EPUB đọc output_text của tab Dịch
-        if self.session["source"] == "server" and self.session["role"] == "admin":
-            self.admin_panel = AdminPanel(nb, self)
-            nb.add(self.admin_panel, text="  ⚙ Quản trị  ")
         self.title(f"{self.title()}  —  v{APP_VERSION}")
         self._admin_list_sync_results = queue.Queue()
 
@@ -5428,45 +5420,7 @@ class App(tk.Tk):
 
         self.after(100, poll_admin_list_sync)
         sync_admin_lists_async(self._admin_list_sync_results.put)
-        if self.admin_client:
-            self._load_admin_datasets_async()
         check_for_update_async(self._on_update_checked)
-
-    def _apply_admin_datasets(self, datasets):
-        datasets = datasets if isinstance(datasets, dict) else {}
-        self.admin_datasets = {
-            key: datasets.get(key, {}) if isinstance(datasets.get(key, {}), dict) else {}
-            for key in ("hanviet", "name", "vp")
-        }
-        ADMIN_API_LIST_WORDS["blacklist"] = _custom_list_expand(
-            "blacklist", datasets.get("blacklist", [])
-        )
-        _refresh_custom_list_targets()
-        if hasattr(self, "tab1"):
-            self.tab1._remove_blacklisted_from_results()
-
-    def _load_admin_datasets_async(self):
-        def worker():
-            try:
-                datasets, error = self.admin_client.get_datasets(), None
-            except Exception as exc:
-                datasets, error = None, str(exc)
-
-            def apply():
-                if not self.winfo_exists():
-                    return
-                if error:
-                    self.translate_tab.status_label.config(text=f"Không tải được dữ liệu quản trị: {error}")
-                    return
-                self._apply_admin_datasets(datasets)
-                self.translate_tab._load_dicts_async()
-
-            try:
-                self.after(0, apply)
-            except (tk.TclError, RuntimeError):
-                pass
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _on_update_checked(self, has_new, tag, release_url, installer_url, installer_size, installer_digest):
         if not has_new:
