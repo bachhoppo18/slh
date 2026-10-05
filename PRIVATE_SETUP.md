@@ -53,11 +53,10 @@ repo.
 
 Add the Actions secret `SLH_RELEASE_TOKEN`, a fine-grained token limited to the
 public `bachhoppo18/slh` repository with Contents read/write access. The private
-workflow obfuscates the client with PyArmor, packages it with PyInstaller, and
-uploads only the installer and portable ZIP to the public repo's Releases.
-PyArmor must be correctly licensed for the app's size and distribution; it
-raises the cost of inspection but cannot make a distributed executable
-impossible to reverse engineer.
+workflow packages the client with PyInstaller and uploads only the installer
+to the public repo's Releases. PyArmor is not used, so Python code bundled in
+the executable can be extracted and inspected; do not treat the executable as
+a way to keep source code secret.
 
 ## Existing Public Repository
 

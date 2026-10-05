@@ -1,11 +1,11 @@
-# Workflow này đặt trong repo source PRIVATE. Mỗi tag v1.0.0 sẽ build bản phát hành
-# đã obfuscate và chỉ upload bộ cài sang repo PUBLIC bachhoppo18/slh.
+# Workflow này đặt trong repo source PRIVATE. Mỗi tag v1.0.0 sẽ build bộ cài
+# và chỉ upload bộ cài sang repo PUBLIC bachhoppo18/slh.
 #
-# Cách phát hành bản mới (làm trên máy bạn, không cần Windows):
-#   git add -A
-#   git commit -m "Bản 1.0.1: sửa lỗi ..."
-#   git tag v1.0.1
-#   git push origin main --tags
+# Cách phát hành: commit thay đổi lên main của slh-source, tạo tag mới, rồi chỉ
+# đẩy tag lên remote của slh-source (không đẩy mã nguồn lên repo public slh).
+#   git push private main
+#   git tag v1.0.10
+#   git push private v1.0.10
 #
 # Sau khoảng 3-5 phút, vào tab "Actions" của repo xem tiến trình build. Xong sẽ
 # tự tạo 1 "Release" mới ở tab "Releases" kèm SLHTool_Setup.exe.
@@ -67,12 +67,6 @@ jobs:
 
       - name: Cài thư viện Python
         run: pip install -r requirements.txt
-
-      - name: Cài PyArmor
-        run: pip install "pyarmor>=9,<10"
-
-      - name: Obfuscate mã Python bằng PyArmor
-        run: pyarmor gen -r -O build/obfuscated slhtool.py
 
       - name: Build .exe (PyInstaller, chế độ onedir)
         run: pyinstaller slhtool.spec
